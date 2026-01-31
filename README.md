@@ -14,4 +14,6 @@
 
 * **Basir Abdul Samad** ([@BasirS](https://github.com/BasirS))
 
+---
+
 ## Project Overview
