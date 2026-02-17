@@ -17,3 +17,5 @@
 ---
 
 ## Project Overview
+
+![Agent Flowchart](figures/Healthcare-Scheduler-Agent-Flowchart.png)
