@@ -1,39 +1,135 @@
-"""
-CareCompanion Agent - Healthcare Scheduler and Post-Discharge Support
-"""
-
 import os
 import json
 import psycopg2
 import google.generativeai as genai
+
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Dict
 from dateutil import parser as date_parser
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from zoneinfo import ZoneInfo
 from pypdf import PdfReader
-from langchain_core.tools import tool
 
-# LangChain/LangGraph imports for agent creation
+from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage
 
-# ===============================
-# CONFIGURATION & INITIALIZATION
-# ===============================
 
-# Configure Gemini
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("NEW_GOOGLE_API_KEY"))
-_genai_model = genai.GenerativeModel("gemini-2.5-flash")
+load_dotenv()
 
-# ===============================
-# DATABASE CONNECTION
-# ===============================
+# ── LLM ───────────────────────────────────────────────────────────────────────
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    google_api_key=os.environ.get("GOOGLE_API_KEY"),
+)
+
+# Also configure genai for direct generation calls (discharge parser, visit summary)
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+_genai_model = genai.GenerativeModel("gemini-2.0-flash")
+
+# ── Google Calendar ────────────────────────────────────────────────────────────
+
+SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+TIMEZONE = "America/New_York"
+
+
+def _get_calendar_service(refresh_token: str):
+    """Build a Calendar API service for a specific user using their refresh token."""
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        scopes=SCOPES,
+    )
+    return build("calendar", "v3", credentials=creds)
+
+
+def _create_calendar_event(refresh_token: str, summary: str, description: str, start_dt: datetime, duration_minutes: int = 60) -> str | None:
+    """Create a single calendar event. Returns event ID or None on failure."""
+    try:
+        service = _get_calendar_service(refresh_token)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=ZoneInfo(TIMEZONE))
+        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        event = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
+        }
+        created = service.events().insert(calendarId="primary", body=event).execute()
+        return created.get("id")
+    except Exception as e:
+        print(f"Calendar event creation failed: {e}")
+        return None
+
+
+def _create_recurring_medication_events(refresh_token: str, med_name: str, dosage: str, schedule: str, start_date, end_date) -> list[str]:
+    """Create daily recurring calendar reminders for a medication. Returns list of event IDs."""
+    try:
+        from datetime import date as date_type
+        service = _get_calendar_service(refresh_token)
+
+        # Parse times from schedule
+        freq = (schedule or "once daily").lower()
+        if "twice" in freq:
+            times = ["08:00", "20:00"]
+        elif "three" in freq:
+            times = ["08:00", "14:00", "20:00"]
+        elif "four" in freq:
+            times = ["08:00", "12:00", "16:00", "20:00"]
+        elif "bedtime" in freq:
+            times = ["21:00"]
+        elif "as needed" in freq or "prn" in freq:
+            times = ["08:00"]
+        else:
+            times = ["08:00"]
+
+        # Parse start/end dates
+        if isinstance(start_date, str):
+            start_date = date_parser.parse(start_date).date()
+        elif isinstance(start_date, datetime):
+            start_date = start_date.date()
+        if not start_date:
+            start_date = date_type.today()
+
+        if isinstance(end_date, str):
+            end_date = date_parser.parse(end_date).date()
+        elif isinstance(end_date, datetime):
+            end_date = end_date.date()
+        if not end_date:
+            end_date = start_date + timedelta(days=14)  # default 14 days
+
+        event_ids = []
+        for time_str in times:
+            hour, minute = map(int, time_str.split(":"))
+            start_dt = datetime(start_date.year, start_date.month, start_date.day, hour, minute, tzinfo=ZoneInfo(TIMEZONE))
+            end_dt_date = end_date
+            # Build RRULE until date
+            until_str = end_dt_date.strftime("%Y%m%dT235959Z")
+            event = {
+                "summary": f"💊 {med_name} {dosage or ''}".strip(),
+                "description": f"Medication reminder: {med_name}\nDosage: {dosage or 'as prescribed'}\nSchedule: {schedule or 'once daily'}",
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
+                "end": {"dateTime": (start_dt + timedelta(minutes=15)).isoformat(), "timeZone": TIMEZONE},
+                "recurrence": [f"RRULE:FREQ=DAILY;UNTIL={until_str}"],
+                "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 10}]},
+            }
+            created = service.events().insert(calendarId="primary", body=event).execute()
+            event_ids.append(created.get("id"))
+        return event_ids
+    except Exception as e:
+        print(f"Medication calendar events failed: {e}")
+        return []
+
+# ── Database ───────────────────────────────────────────────────────────────────
 
 def get_db_connection():
-    """Create a connection to Neon PostgreSQL"""
     return psycopg2.connect(
         host=os.environ["DB_HOST"],
         database=os.environ["DB_NAME"],
@@ -41,866 +137,14 @@ def get_db_connection():
         password=os.environ["DB_PASSWORD"],
         port=os.environ["DB_PORT"],
         sslmode="require",
-        connect_timeout=10
+        connect_timeout=30,
+        options="-c statement_timeout=15000",
     )
 
-def get_connection():
-    """Alias for get_db_connection"""
-    return get_db_connection()
-
-# ===============================
-# REFERENCE DATABASES
-# ===============================
-
-MEDICATIONS_DB = {
-    "acetaminophen": {
-        "purpose": "Relieves mild to moderate pain and reduces fever",
-        "common_side_effects": "Generally well-tolerated; rare side effects include nausea",
-        "warnings": "Do not exceed 3000mg per day. Do not take with alcohol.",
-        "food_instructions": "Can be taken with or without food"
-    },
-    "ibuprofen": {
-        "purpose": "Reduces pain, inflammation, and fever",
-        "common_side_effects": "Stomach upset, nausea, dizziness",
-        "warnings": "Take with food to prevent stomach upset.",
-        "food_instructions": "Take with food or milk"
-    },
-    "metoprolol": {
-        "purpose": "Lowers blood pressure and heart rate",
-        "common_side_effects": "Tiredness, dizziness, slow heartbeat",
-        "warnings": "Do not stop taking suddenly.",
-        "food_instructions": "Take with food"
-    },
-}
-
-WARNING_SIGNS_DB = {
-    "cardiac_surgery": {
-        "emergency_signs": [
-            "chest pain that is severe or getting worse",
-            "difficulty breathing or shortness of breath at rest",
-            "sudden weakness on one side of body"
-        ],
-        "urgent_signs": [
-            "incision is red, swollen, or draining pus",
-            "fever above 100.4°F",
-            "leg swelling that is new or getting worse"
-        ],
-        "expected_symptoms": [
-            "mild soreness around incision",
-            "tiredness and fatigue for several weeks"
-        ]
-    },
-}
-
-MEDICATIONS_LOG_DB = {
-    "common_medications": {
-        "metoprolol": {
-            "generic_name": "Metoprolol",
-            "brand_names": ["Lopressor", "Toprol-XL"],
-            "drug_class": "Beta-blocker",
-            "common_uses": ["high blood pressure", "heart failure"],
-            "typical_dosages": ["25mg", "50mg", "100mg"],
-            "common_side_effects": ["tiredness", "dizziness"],
-            "serious_warnings": ["Do not stop suddenly"],
-            "food_interactions": "Can be taken with or without food",
-            "timing_notes": "Take at same time each day"
-        },
-    }
-}
-
-REMINDERS_DB = {
-    "reminder_types": {
-        "medication": {
-            "priority": "high",
-            "default_advance_time": "15 minutes",
-            "allow_snooze": True
-        },
-        "appointment": {
-            "priority": "high",
-            "reminder_schedule": ["1 day before", "2 hours before"]
-        }
-    }
-}
-
-# ===============================
-# DATABASE HELPER FUNCTIONS
-# ===============================
-
-def create_user(name: str, email: str = None, phone: str = None) -> int:
-    """Add a new user to the users table."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (name, email, phone) VALUES (%s, %s, %s) RETURNING user_id;",
-        (name, email, phone)
-    )
-    user_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return user_id
-
-def add_medication(user_id: int, medication_name: str, dosage: str = None, schedule: str = None) -> int:
-    """Add a medication record for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO medication_logs (user_id, medication_name, dosage, schedule)
-           VALUES (%s, %s, %s, %s) RETURNING medication_id;""",
-        (user_id, medication_name, dosage, schedule)
-    )
-    medication_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return medication_id
-
-def get_medications(user_id: int):
-    """Get medications for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT medication_name, dosage, schedule
-        FROM medication_logs
-        WHERE user_id = %s
-        ORDER BY created_at DESC;
-    """, (user_id,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-def add_discharge_instruction(user_id: int, instruction: str) -> int:
-    """Add discharge instructions for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO discharge_instructions (user_id, instruction) VALUES (%s, %s) RETURNING instruction_id;",
-        (user_id, instruction)
-    )
-    instruction_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return instruction_id
-
-def create_appointment(user_id: int, appointment_time, reason: str = None) -> int:
-    """Schedule an appointment for a patient"""
-    conn = get_connection()
-    cur = conn.cursor()
-    if hasattr(appointment_time, 'tzinfo') and appointment_time.tzinfo is not None:
-        appointment_time = appointment_time.replace(tzinfo=None)
-    cur.execute("""
-        INSERT INTO appointments (user_id, appointment_time, reason)
-        VALUES (%s, %s, %s) RETURNING id;
-    """, (user_id, appointment_time, reason))
-    appointment_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return appointment_id
-
-def get_appointments(user_id: int):
-    """Get appointments for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, appointment_time, reason
-        FROM appointments
-        WHERE user_id = %s
-        ORDER BY appointment_time;
-    """, (user_id,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-def add_reminder(user_id: int, reminder_type: str, message: str, remind_at):
-    """Add a reminder for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO reminders (user_id, reminder_type, message, remind_at) VALUES (%s, %s, %s, %s) RETURNING reminder_id;",
-        (user_id, reminder_type, message, remind_at)
-    )
-    reminder_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return reminder_id
-
-def get_symptom_logs(user_id: int):
-    """Get symptom history for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT symptom, severity, logged_at
-        FROM symptom_logs
-        WHERE user_id = %s
-        ORDER BY logged_at DESC;
-    """, (user_id,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-def log_symptom(user_id: int, symptom: str, severity: int) -> int:
-    """Add a symptom log to the database"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO symptom_logs (user_id, symptom, severity)
-        VALUES (%s, %s, %s) RETURNING symptom_id;
-    """, (user_id, symptom, severity))
-    symptom_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return symptom_id
-
-def add_note(user_id: int, content: str) -> int:
-    """Add a note for a user"""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO notes (user_id, content) VALUES (%s, %s) RETURNING note_id;",
-        (user_id, content)
-    )
-    note_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return note_id
-
-# ===============================
-# GOOGLE CALENDAR INTEGRATION
-# ===============================
-
-def authenticate_google_calendar():
-    """Authenticate with Google Calendar using service account"""
-    SCOPES = ["https://www.googleapis.com/auth/calendar"]
-    credentials = service_account.Credentials.from_service_account_file(
-        "service_account.json",
-        scopes=SCOPES
-    )
-    return build("calendar", "v3", credentials=credentials)
-
-def sync_appointment_to_google_calendar(appointment_time, summary, description=None, duration_minutes=30):
-    """Sync an appointment to Google Calendar"""
-    service = authenticate_google_calendar()
-    CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID")
-    TIMEZONE = "America/New_York"
-    
-    if appointment_time.tzinfo is None:
-        appointment_time = appointment_time.replace(tzinfo=ZoneInfo(TIMEZONE))
-    
-    start_time = appointment_time.isoformat()
-    end_time = (appointment_time + timedelta(minutes=duration_minutes)).isoformat()
-    
-    event = {
-        "summary": summary,
-        "description": description or "",
-        "start": {"dateTime": start_time, "timeZone": TIMEZONE},
-        "end": {"dateTime": end_time, "timeZone": TIMEZONE},
-    }
-    
-    created_event = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-    return created_event.get("htmlLink")
-
-# ===============================
-# HELPER FUNCTIONS
-# ===============================
-
-def assess_symptom_severity(symptom: str, severity: int, condition_data: dict) -> dict:
-    """Helper function to assess symptom severity"""
-    symptom_lower = symptom.lower()
-    
-    emergency_signs = condition_data.get("emergency_signs", [])
-    for sign in emergency_signs:
-        if any(word in symptom_lower for word in sign.lower().split()):
-            if severity >= 7:
-                return {"level": "emergency", "reason": f"This matches: {sign}"}
-    
-    urgent_signs = condition_data.get("urgent_signs", [])
-    for sign in urgent_signs:
-        if any(word in symptom_lower for word in sign.lower().split()):
-            if severity >= 5:
-                return {"level": "urgent", "reason": f"This could indicate: {sign}"}
-    
-    if severity >= 8:
-        return {"level": "urgent", "reason": f"Severe symptom (severity {severity}/10)"}
-    if severity >= 5:
-        return {"level": "monitor", "reason": f"Moderate symptom (severity {severity}/10)"}
-    
-    return {"level": "normal", "reason": "Mild symptom within expected range."}
-
-# ===============================
-# TOOL 1: DISCHARGE PARSER
-# ===============================
-
-@tool
-def parse_discharge_instructions(user_id: int, discharge_text: str) -> str:
-    """
-    Parse discharge instructions and extract:
-    - Medications
-    - Appointments
-    - Care instructions
-    """
-    prompt = f"""
-You are a medical discharge parser.
-Extract structured information from the discharge instructions below.
-Return ONLY valid JSON in this format (no markdown fences, no extra text):
-
-{{
-    "medications": [
-        {{
-            "name": "string",
-            "dosage": "string",
-            "schedule": "string"
-        }}
-    ],
-    "appointments": [
-        {{
-            "datetime": "string or null",
-            "reason": "string"
-        }}
-    ],
-    "care_instructions": [
-        "string"
-    ]
-}}
-
-Discharge Instructions:
-{discharge_text}
-"""
-    try:
-        response = _genai_model.generate_content(prompt)
-        raw_output = response.text.strip()
-        if raw_output.startswith("```"):
-            raw_output = raw_output.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(raw_output)
-    except Exception as e:
-        return f"⚠️ Parsing failed: {str(e)}"
-    
-    # Store Medications
-    for med in parsed.get("medications", []):
-        add_medication(
-            user_id=user_id,
-            medication_name=med.get("name"),
-            dosage=med.get("dosage"),
-            schedule=med.get("schedule"),
-        )
-    
-    # Store Appointments
-    for appt in parsed.get("appointments", []):
-        dt_string = appt.get("datetime")
-        reason = appt.get("reason")
-        if dt_string:
-            try:
-                appointment_time = date_parser.parse(dt_string)
-                create_appointment(user_id=user_id, appointment_time=appointment_time, reason=reason)
-            except Exception:
-                pass
-    
-    # Store Care Instructions
-    for instruction in parsed.get("care_instructions", []):
-        add_discharge_instruction(user_id, instruction)
-    
-    return (
-        f"✅ Discharge instructions processed successfully.\n"
-        f"- Medications added: {len(parsed.get('medications', []))}\n"
-        f"- Appointments scheduled: {len(parsed.get('appointments', []))}\n"
-        f"- Care instructions saved: {len(parsed.get('care_instructions', []))}"
-    )
-
-# ===============================
-# TOOL 2: MEDICATION SCHEDULE
-# ===============================
-
-@tool
-def create_medication_schedule(user_id: int) -> str:
-    """
-    Create a daily medication reminder schedule for a patient.
-    """
-    medications = get_medications(user_id)
-    if not medications:
-        return "No medications found for this patient. Please add medications first."
-    
-    all_reminders = []
-    schedule_output = ["📋 YOUR DAILY MEDICATION SCHEDULE", "=" * 40, ""]
-    
-    for med in medications:
-        med_name = med[0].lower() if med[0] else ""
-        dosage = med[1] if len(med) > 1 and med[1] else ""
-        frequency = med[2] if len(med) > 2 and med[2] else "once daily"
-        
-        if not med_name:
-            continue
-        
-        med_info = MEDICATIONS_LOG_DB["common_medications"].get(med_name, {})
-        food_instructions = med_info.get("food_interactions", "No specific instructions")
-        timing_notes = med_info.get("timing_notes", "")
-        
-        freq_lower = frequency.lower() if frequency else "once daily"
-        if "once" in freq_lower or "daily" in freq_lower:
-            times = ["08:00"]
-        elif "twice" in freq_lower:
-            times = ["08:00", "20:00"]
-        elif "three" in freq_lower:
-            times = ["08:00", "14:00", "20:00"]
-        elif "bedtime" in freq_lower:
-            times = ["22:00"]
-        else:
-            times = ["08:00"]
-        
-        schedule_output.append(f"💊 {med_name.upper()} {dosage}")
-        schedule_output.append(f"   Frequency: {frequency}")
-        
-        display_times = []
-        for t in times:
-            hour, minute = t.split(':')
-            hour_int = int(hour)
-            if hour_int < 12:
-                display_times.append(f"{hour_int}:{minute} AM")
-            elif hour_int == 12:
-                display_times.append(f"12:{minute} PM")
-            else:
-                display_times.append(f"{hour_int-12}:{minute} PM")
-        
-        schedule_output.append(f"   Times: {', '.join(display_times) if times else 'As needed'}")
-        schedule_output.append(f"   📝 {food_instructions}")
-        if timing_notes:
-            schedule_output.append(f"   ⏰ {timing_notes}")
-        schedule_output.append("")
-        
-        for time_str in times:
-            try:
-                hour, minute = map(int, time_str.split(':'))
-                now = datetime.now()
-                reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if reminder_time < now:
-                    reminder_time = reminder_time + timedelta(days=1)
-                
-                add_reminder(
-                    user_id=user_id,
-                    reminder_type="medication",
-                    message=f"Take {dosage} of {med_name}. {food_instructions}",
-                    remind_at=reminder_time
-                )
-                all_reminders.append({"med": med_name, "time": time_str})
-            except Exception as e:
-                schedule_output.append(f"   ⚠️ Could not create reminder: {str(e)}")
-    
-    schedule_output.append("=" * 40)
-    schedule_output.append(f"✅ Created {len(all_reminders)} reminders")
-    schedule_output.append("⚠️ Set alarms on your phone as backup!")
-    
-    return "\n".join(schedule_output)
-
-@tool
-def get_medication_info(medication_name: str) -> str:
-    """
-    Look up information about a specific medication.
-    """
-    med_name = medication_name.lower().strip()
-    med_info = MEDICATIONS_LOG_DB["common_medications"].get(med_name)
-    
-    if not med_info:
-        return f"No information found for '{medication_name}'."
-    
-    output = [
-        f"💊 {med_info.get('generic_name', medication_name).upper()}",
-        f"Brand names: {', '.join(med_info.get('brand_names', ['N/A']))}",
-        f"Drug class: {med_info.get('drug_class', 'N/A')}",
-        "",
-        f"📋 Common uses: {', '.join(med_info.get('common_uses', ['N/A']))}",
-        f"💊 Typical dosages: {', '.join(med_info.get('typical_dosages', ['N/A']))}",
-        "",
-        f"⚠️ Side effects: {', '.join(med_info.get('common_side_effects', ['N/A']))}",
-        "",
-        "🚨 WARNINGS:",
-    ]
-    
-    for warning in med_info.get("serious_warnings", ["None listed"]):
-        output.append(f"   • {warning}")
-    
-    output.append("")
-    output.append(f"🍽️ Food: {med_info.get('food_interactions', 'No specific instructions')}")
-    output.append(f"⏰ Timing: {med_info.get('timing_notes', 'Follow prescription')}")
-    
-    return "\n".join(output)
-
-# ===============================
-# TOOL 3: SYMPTOM CHECKER
-# ===============================
-
-@tool
-def log_symptom_check(user_id: int, symptom: str, severity: int, condition_type: Optional[str] = None) -> str:
-    """
-    Log a symptom for a patient and check if it requires medical attention.
-    """
-    try:
-        symptom_id = log_symptom(user_id, symptom, severity)
-    except Exception as e:
-        return f"❌ Error logging symptom: {str(e)}"
-    
-    recent_symptoms = get_symptom_logs(user_id)
-    
-    response = [
-        f"✅ Symptom logged: '{symptom}' (Severity: {severity}/10)",
-        f"   Symptom ID: {symptom_id}",
-        ""
-    ]
-    
-    if condition_type and condition_type.lower() in WARNING_SIGNS_DB:
-        condition_data = WARNING_SIGNS_DB[condition_type.lower()]
-        warning_assessment = assess_symptom_severity(symptom.lower(), severity, condition_data)
-        
-        if warning_assessment["level"] == "emergency":
-            response.extend([
-                "🚨 **EMERGENCY WARNING** 🚨",
-                "⚠️ Your symptom requires IMMEDIATE medical attention:",
-                f"   • {warning_assessment['reason']}",
-                "",
-                "**IMMEDIATE ACTIONS:**",
-                "1. Call 911 or go to the nearest emergency room NOW",
-                "2. Do not wait - this is urgent",
-                ""
-            ])
-        elif warning_assessment["level"] == "urgent":
-            response.extend([
-                "⚠️ **URGENT CARE NEEDED** ⚠️",
-                "You should contact your doctor TODAY:",
-                f"   • {warning_assessment['reason']}",
-                ""
-            ])
-    
-    response.extend([
-        "🏠 **Self-Care Reminders:**",
-        "• Take medications as prescribed",
-        "• Stay hydrated (unless fluid restricted)",
-        "• Get adequate rest",
-        "• Follow your discharge instructions",
-        "",
-        "📞 **Emergency:** Call 911 for severe symptoms",
-        "📞 **Doctor's Office:** Call during business hours for non-emergency concerns"
-    ])
-    
-    return "\n".join(response)
-
-@tool
-def daily_symptom_checkin(user_id: int, condition_type: Optional[str] = None) -> str:
-    """
-    Perform a daily symptom check-in for a patient.
-    """
-    today = datetime.now().date()
-    recent_symptoms = get_symptom_logs(user_id)
-    
-    response = [
-        "🌅 **DAILY SYMPTOM CHECK-IN**",
-        "=" * 40,
-        "",
-    ]
-    
-    if recent_symptoms:
-        latest_time = recent_symptoms[0][2]
-        if hasattr(latest_time, 'date') and latest_time.date() == today:
-            response.extend([
-                "📝 You've already completed a check-in today.",
-                "Here's your most recent symptom log:",
-                ""
-            ])
-            for symptom, severity, log_time in recent_symptoms[:3]:
-                time_str = log_time.strftime("%I:%M %p") if hasattr(log_time, 'strftime') else str(log_time)
-                response.append(f"   • {symptom} (Severity: {severity}/10) - {time_str}")
-            response.append("")
-    
-    response.extend([
-        "**Today's Check-In Questions:**",
-        "1. How is your pain level today? (1-10)",
-        "2. Any new or worsening symptoms?",
-        "3. Have you taken all medications as prescribed?",
-        "4. How is your energy level?",
-        "",
-        "💡 **To log a symptom, use: 'Log symptom: [symptom], severity: [1-10]'**",
-    ])
-    
-    return "\n".join(response)
-
-@tool
-def analyze_symptom_trends(user_id: int, days: int = 7) -> str:
-    """
-    Analyze symptom trends for a patient over a specified time period.
-    """
-    all_symptoms = get_symptom_logs(user_id)
-    
-    if not all_symptoms:
-        return "No symptom data available. Start logging symptoms to track trends!"
-    
-    cutoff_date = datetime.now() - timedelta(days=days)
-    recent_symptoms = []
-    for symptom, severity, log_time in all_symptoms:
-        if hasattr(log_time, 'date') and log_time >= cutoff_date:
-            recent_symptoms.append((symptom, severity, log_time))
-    
-    if not recent_symptoms:
-        return f"No symptoms logged in the last {days} days."
-    
-    symptom_data = {}
-    for symptom, severity, _ in recent_symptoms:
-        if symptom not in symptom_data:
-            symptom_data[symptom] = []
-        symptom_data[symptom].append(severity)
-    
-    response = [
-        f"📊 **SYMPTOM TREND ANALYSIS (Last {days} Days)**",
-        "=" * 50,
-        "",
-        f"**Total symptoms logged:** {len(recent_symptoms)}",
-        f"**Unique symptoms:** {len(symptom_data)}",
-        ""
-    ]
-    
-    response.append("**Symptom Breakdown:**")
-    for symptom, severities in symptom_data.items():
-        avg_severity = sum(severities) / len(severities)
-        max_severity = max(severities)
-        trend = "improving" if len(severities) > 1 and severities[-1] < severities[0] else \
-                "worsening" if len(severities) > 1 and severities[-1] > severities[0] else \
-                "stable"
-        
-        response.extend([
-            f"   • {symptom}:",
-            f"     - Occurrences: {len(severities)}",
-            f"     - Average severity: {avg_severity:.1f}/10",
-            f"     - Peak severity: {max_severity}/10",
-            f"     - Trend: {trend}"
-        ])
-    
-    return "\n".join(response)
-
-# ===============================
-# TOOL 4: VISIT SUMMARY
-# ===============================
-
-@tool
-def generate_visit_summary(user_id: int) -> str:
-    """
-    Fetches symptom logs and medications for a user and generates a summary for a doctor's visit.
-    """
-    symptoms = get_symptom_logs(user_id)
-    medications = get_medications(user_id)
-    appointments = get_appointments(user_id)
-    
-    symptom_str = ""
-    if symptoms:
-        for s in symptoms[:10]:
-            if hasattr(s[2], 'strftime'):
-                date_str = s[2].strftime("%b %d, %Y")
-            else:
-                date_str = str(s[2])
-            symptom_str += f"- {s[0]} (Severity: {s[1]}/10) on {date_str}\n"
-    else:
-        symptom_str = "No symptoms logged."
-    
-    med_str = ""
-    if medications:
-        for m in medications:
-            med_str += f"- {m[0]} {m[1]}: {m[2]}\n"
-    else:
-        med_str = "No medications listed."
-    
-    appt_str = ""
-    if appointments:
-        for a in appointments:
-            if hasattr(a[1], 'strftime'):
-                appt_time = a[1].strftime("%b %d, %Y at %I:%M %p")
-            else:
-                appt_time = str(a[1])
-            appt_str += f"- {a[2] or 'Follow-up'} on {appt_time}\n"
-    else:
-        appt_str = "No upcoming appointments."
-    
-    prompt_text = f"""
-    You are a medical assistant helping a patient prepare for a doctor's visit.
-    Based on the following data, provide a concise, well-organized summary.
-    
-    SYMPTOMS (Recent):
-    {symptom_str}
-    
-    CURRENT MEDICATIONS:
-    {med_str}
-    
-    UPCOMING APPOINTMENTS:
-    {appt_str}
-    
-    Please format your response as follows:
-    
-    📊 **VISIT SUMMARY**
-    
-    **Overall Health Trend:**
-    [Brief assessment - are symptoms improving/worsening/stable?]
-    
-    **Key Concerns to Discuss:**
-    • [List 2-3 main symptoms or issues]
-    
-    **Medication Adherence:**
-    [Brief note on medications]
-    
-    **Suggested Questions for Your Doctor:**
-    1. [Question 1 based on symptoms]
-    2. [Question 2 based on medications]
-    3. [Question 3 about next steps]
-    
-    **What to Bring:**
-    • This summary
-    • Current medication list
-    • Insurance card
-    • List of questions
-    """
-    
-    try:
-        response = _genai_model.generate_content(prompt_text)
-        return f"VISIT SUMMARY\n{'-'*40}\n{response.text}"
-    except Exception as e:
-        return f"❌ Error generating summary: {str(e)}"
-
-# ===============================
-# RAG TOOLS
-# ===============================
-
-def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF file"""
-    try:
-        reader = PdfReader(pdf_path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
-    except Exception as e:
-        return f"Error extracting PDF: {str(e)}"
-
-def consult_discharge_instructions(query: str, pdf_text: Optional[str] = None) -> str:
-    """
-    Searches the uploaded discharge instructions to answer specific questions.
-    """
-    try:
-        if pdf_text:
-            text = pdf_text
-        else:
-            reader = PdfReader("discharge_summary.pdf")
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-        
-        prompt = f"""
-        Based on the following discharge instructions, please answer the patient's question.
-        
-        DISCHARGE INSTRUCTIONS:
-        {text[:3000]}
-        
-        PATIENT'S QUESTION:
-        {query}
-        
-        Please provide a clear, helpful answer based ONLY on the information in the instructions.
-        If the answer cannot be found, politely say so and suggest they contact their doctor.
-        """
-        
-        response = _genai_model.generate_content(prompt)
-        return response.text
-    except FileNotFoundError:
-        return "No discharge PDF found. Please upload your discharge instructions first."
-    except Exception as e:
-        return f"Error processing PDF: {str(e)}"
-
-def medical_knowledge_retrieval(topic: str) -> str:
-    """
-    Accesses the internal medical database for drug purposes, side effects, and warning signs.
-    """
-    topic = topic.lower().strip()
-    
-    if topic in MEDICATIONS_DB:
-        info = MEDICATIONS_DB[topic]
-        return f"💊 {topic.title()}:\n" + "\n".join([f"   • {k}: {v}" for k, v in info.items()])
-    
-    for condition, data in WARNING_SIGNS_DB.items():
-        if topic in condition.replace('_', ' '):
-            result = [f"⚠️ {condition.replace('_', ' ').title()} Warning Signs:\n"]
-            result.append("🚨 EMERGENCY:")
-            for sign in data.get('emergency_signs', [])[:3]:
-                result.append(f"   • {sign}")
-            result.append("\n⚠️ URGENT:")
-            for sign in data.get('urgent_signs', [])[:3]:
-                result.append(f"   • {sign}")
-            return "\n".join(result)
-    
-    return "No specific medical reference found for that topic. Please consult your healthcare provider."
-
-# ===============================
-# AGENT CREATION
-# ===============================
-
-def create_agent():
-    """Create and return the compiled LangGraph agent"""
-    
-    # Initialize the model
-    model = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        temperature=0,
-        google_api_key=os.getenv("NEW_GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    )
-    
-    # List all your tools
-    tools = [
-        parse_discharge_instructions,
-        create_medication_schedule,
-        get_medication_info,
-        log_symptom_check,
-        daily_symptom_checkin,
-        analyze_symptom_trends,
-        generate_visit_summary,
-        medical_knowledge_retrieval,
-        consult_discharge_instructions,
-        create_appointment,
-        add_note,
-    ]
-    
-    # System prompt
-    system_prompt = """You are CareCompanion, a supportive healthcare assistant helping patients manage post-discharge care.
-    
-    You have access to various tools to help patients:
-    - Parse discharge instructions to extract medications, appointments, and care instructions
-    - Create medication schedules and reminders
-    - Look up medication information
-    - Log and track symptoms
-    - Analyze symptom trends
-    - Generate visit summaries for doctor appointments
-    - Retrieve medical knowledge
-    - Answer questions from discharge instructions
-    - Create appointments
-    - Add notes
-    
-    Always be empathetic, clear, and concise. If a symptom seems severe (7+), advise seeking immediate medical attention.
-    """
-    
-    # Create the agent
-    agent = create_react_agent(
-        model=model,
-        tools=tools,
-        prompt=system_prompt
-    )
-    
-    return agent
-
-# ===============================
-# DATABASE INITIALIZATION
-# ===============================
 
 def init_db():
-    """Initialize database tables if they don't exist"""
     conn = get_db_connection()
     cur = conn.cursor()
-    
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id SERIAL PRIMARY KEY,
@@ -909,16 +153,13 @@ def init_db():
             phone TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        
-        CREATE TABLE IF NOT EXISTS medication_logs (
-            medication_id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-            medication_name TEXT NOT NULL,
-            dosage TEXT,
-            schedule TEXT,
+        CREATE TABLE IF NOT EXISTS appointments (
+            id SERIAL PRIMARY KEY,
+            patient_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            appointment_time TIMESTAMP NOT NULL,
+            reason TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        
         CREATE TABLE IF NOT EXISTS symptom_logs (
             symptom_id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -926,47 +167,724 @@ def init_db():
             severity INTEGER CHECK (severity >= 1 AND severity <= 10),
             logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        
+        CREATE TABLE IF NOT EXISTS medication_logs (
+            medication_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            medication_name TEXT NOT NULL,
+            dosage TEXT,
+            schedule TEXT,
+            start_date DATE,
+            end_date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS discharge_instructions (
             instruction_id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
             instruction TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        
-        CREATE TABLE IF NOT EXISTS appointments (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-            appointment_time TIMESTAMP NOT NULL,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS reminders (
-            reminder_id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-            reminder_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            remind_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
         CREATE TABLE IF NOT EXISTS notes (
             note_id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
             content TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS reminders (
+            reminder_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            reminder_type TEXT,
+            message TEXT,
+            remind_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS medication_taken (
+            taken_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            medication_id INTEGER REFERENCES medication_logs(medication_id) ON DELETE CASCADE,
+            taken_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            taken_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (medication_id, taken_date)
+        );
+        CREATE TABLE IF NOT EXISTS visit_summaries (
+            summary_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT 'Visit Summary',
+            ai_summary TEXT,
+            user_notes TEXT,
+            visit_date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
-    
+    # Schema migrations — safe to run on every startup
+    migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth DATE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS primary_condition TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS reminder_preference TEXT DEFAULT 'email'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_time TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS location TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS patient_id_number TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS insurance_id TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS medical_history TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS location TEXT",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS appointment_type TEXT DEFAULT 'follow-up'",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'upcoming'",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'",
+        "ALTER TABLE symptom_logs ADD COLUMN IF NOT EXISTS condition_type TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
+        "ALTER TABLE medication_logs ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
+    ]
+    for sql in migrations:
+        cur.execute(sql)
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ Database tables initialized")
 
-# ===============================
-# EXPORT AGENT INSTANCE
-# ===============================
+# ── DB Helpers ─────────────────────────────────────────────────────────────────
 
-# Create the compiled agent instance that main.py imports
-agent = create_agent()
+def _create_appointment_db(patient_id: int, appointment_time, reason: str = None) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO appointments (patient_id, appointment_time, reason) VALUES (%s, %s, %s) RETURNING id;",
+        (patient_id, appointment_time, reason),
+    )
+    appt_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return appt_id
+
+
+def _get_appointments(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, appointment_time, reason, created_at FROM appointments WHERE patient_id=%s ORDER BY appointment_time;",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def _add_discharge_instruction(user_id: int, instruction: str) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Skip if this exact instruction already exists for this user
+    cur.execute(
+        "SELECT instruction_id FROM discharge_instructions WHERE user_id=%s AND instruction=%s LIMIT 1;",
+        (user_id, instruction),
+    )
+    existing = cur.fetchone()
+    if existing:
+        cur.close()
+        conn.close()
+        return existing[0]
+    cur.execute(
+        "INSERT INTO discharge_instructions (user_id, instruction) VALUES (%s, %s) RETURNING instruction_id;",
+        (user_id, instruction),
+    )
+    iid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return iid
+
+
+def _get_discharge_instructions(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT instruction_id, instruction, created_at FROM discharge_instructions WHERE user_id=%s ORDER BY created_at DESC;",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def _log_symptom(user_id: int, symptom: str, severity: int) -> int:
+    severity = max(1, min(10, severity))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO symptom_logs (user_id, symptom, severity) VALUES (%s, %s, %s) RETURNING symptom_id;",
+        (user_id, symptom, severity),
+    )
+    sid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return sid
+
+
+def _get_symptom_logs(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT symptom, severity, logged_at FROM symptom_logs WHERE user_id=%s ORDER BY logged_at DESC;",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def _add_medication(user_id: int, medication_name: str, dosage: str = None, schedule: str = None, start_date=None, end_date=None) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Skip if this medication+dosage already exists for this user
+    cur.execute(
+        "SELECT medication_id FROM medication_logs WHERE user_id=%s AND LOWER(medication_name)=LOWER(%s) AND dosage=%s LIMIT 1;",
+        (user_id, medication_name, dosage),
+    )
+    existing = cur.fetchone()
+    if existing:
+        cur.close()
+        conn.close()
+        return existing[0]
+    cur.execute(
+        "INSERT INTO medication_logs (user_id, medication_name, dosage, schedule, start_date, end_date) VALUES (%s,%s,%s,%s,%s,%s) RETURNING medication_id;",
+        (user_id, medication_name, dosage, schedule, start_date, end_date),
+    )
+    mid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return mid
+
+
+def _get_medications(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT medication_name, dosage, schedule, start_date, end_date, created_at FROM medication_logs WHERE user_id=%s;",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def _add_reminder(user_id: int, reminder_type: str, message: str, remind_at) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO reminders (user_id, reminder_type, message, remind_at) VALUES (%s,%s,%s,%s) RETURNING reminder_id;",
+        (user_id, reminder_type, message, remind_at),
+    )
+    rid = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return rid
+
+# ── Reference Data ─────────────────────────────────────────────────────────────
+
+MEDICATIONS_DB = {
+    "acetaminophen": {"purpose": "Relieves mild to moderate pain and reduces fever", "common_side_effects": "Generally well-tolerated; rare side effects include nausea", "warnings": "Do not exceed 3000mg per day. Do not take with alcohol.", "food_instructions": "Can be taken with or without food"},
+    "ibuprofen": {"purpose": "Reduces pain, inflammation, and fever", "common_side_effects": "Stomach upset, nausea, dizziness", "warnings": "Take with food to prevent stomach upset. Do not use if you have kidney problems or stomach ulcers.", "food_instructions": "Take with food or milk"},
+    "oxycodone": {"purpose": "Treats moderate to severe pain", "common_side_effects": "Drowsiness, constipation, nausea, dizziness", "warnings": "Do not drive or operate machinery. Do not drink alcohol. Can be habit-forming.", "food_instructions": "Can be taken with or without food"},
+    "metoprolol": {"purpose": "Lowers blood pressure and heart rate, protects the heart", "common_side_effects": "Tiredness, dizziness, slow heartbeat", "warnings": "Do not stop taking suddenly. Call doctor if heart rate drops below 50.", "food_instructions": "Take with food"},
+    "lisinopril": {"purpose": "Lowers blood pressure and protects kidneys and heart", "common_side_effects": "Dry cough, dizziness, headache", "warnings": "Call doctor if you develop swelling of face, lips, or tongue.", "food_instructions": "Can be taken with or without food"},
+    "aspirin": {"purpose": "Prevents blood clots, reduces risk of heart attack and stroke", "common_side_effects": "Stomach upset, heartburn", "warnings": "Can cause bleeding. Call doctor if you see blood in stool or unusual bruising.", "food_instructions": "Take with food to reduce stomach upset"},
+    "atorvastatin": {"purpose": "Lowers cholesterol to reduce risk of heart disease", "common_side_effects": "Muscle aches, headache, nausea", "warnings": "Call doctor if you have unexplained muscle pain or weakness.", "food_instructions": "Take in the evening, with or without food"},
+    "warfarin": {"purpose": "Prevents blood clots", "common_side_effects": "Bleeding, bruising", "warnings": "Requires regular blood tests. Avoid alcohol. Maintain consistent vitamin K intake.", "food_instructions": "Take at the same time each day"},
+    "amoxicillin": {"purpose": "Treats bacterial infections", "common_side_effects": "Diarrhea, nausea, rash", "warnings": "Complete the full course even if you feel better.", "food_instructions": "Can be taken with or without food"},
+    "ciprofloxacin": {"purpose": "Treats bacterial infections", "common_side_effects": "Nausea, diarrhea, dizziness", "warnings": "Avoid dairy products and antacids within 2 hours. Call doctor if you have tendon pain.", "food_instructions": "Take 2 hours before or 6 hours after dairy"},
+    "metformin": {"purpose": "Lowers blood sugar in type 2 diabetes", "common_side_effects": "Nausea, diarrhea, stomach upset", "warnings": "Call doctor if you have severe nausea, vomiting, or rapid breathing.", "food_instructions": "Take with meals to reduce stomach upset"},
+    "omeprazole": {"purpose": "Reduces stomach acid, treats heartburn and ulcers", "common_side_effects": "Headache, nausea, diarrhea", "warnings": "Take 30-60 minutes before eating.", "food_instructions": "Take before breakfast"},
+    "furosemide": {"purpose": "Removes excess fluid, treats swelling and high blood pressure", "common_side_effects": "Frequent urination, dizziness, muscle cramps", "warnings": "Take in the morning to avoid nighttime urination.", "food_instructions": "Can be taken with or without food"},
+    "prednisone": {"purpose": "Reduces inflammation and suppresses immune system", "common_side_effects": "Increased appetite, mood changes, trouble sleeping", "warnings": "Do not stop suddenly if taking for more than a few days.", "food_instructions": "Take with food to prevent stomach upset"},
+    "apixaban": {"purpose": "Prevents blood clots, reduces stroke risk", "common_side_effects": "Bleeding, bruising", "warnings": "Call doctor if you have unusual bleeding or blood in urine.", "food_instructions": "Can be taken with or without food"},
+    "gabapentin": {"purpose": "Treats nerve pain and post-surgical pain", "common_side_effects": "Drowsiness, dizziness, swelling of feet", "warnings": "Do not stop suddenly. May cause drowsiness - avoid driving initially.", "food_instructions": "Take with food"},
+}
+
+WARNING_SIGNS_DB = {
+    "cardiac_surgery": {
+        "emergency_signs": ["chest pain that is severe or getting worse", "difficulty breathing or shortness of breath at rest", "sudden weakness on one side of body", "fainting or passing out", "coughing up blood", "heart racing or pounding that does not stop", "temperature above 101.5°F with chills"],
+        "urgent_signs": ["incision is red, swollen, or draining pus", "fever above 100.4°F", "leg swelling that is new or getting worse", "weight gain of more than 3 pounds in one day", "nausea or vomiting that prevents taking medications", "dizziness that does not go away"],
+        "expected_symptoms": ["mild soreness around incision", "tiredness and fatigue for several weeks", "trouble sleeping", "mild swelling in legs that improves with elevation", "decreased appetite", "mood changes or feeling emotional", "mild constipation from pain medications"],
+    },
+    "joint_replacement": {
+        "emergency_signs": ["sudden severe pain in the surgical leg", "chest pain or difficulty breathing", "calf pain with swelling and warmth (possible blood clot)", "surgical leg turns pale, blue, or cold", "fainting or passing out"],
+        "urgent_signs": ["fever above 100.4°F", "increased redness or warmth around incision", "drainage from incision that is yellow, green, or smells bad", "new numbness or tingling in foot", "unable to bear weight as instructed"],
+        "expected_symptoms": ["pain and swelling around the joint for several weeks", "bruising that may spread down the leg", "clicking or popping sounds from new joint", "difficulty sleeping due to discomfort", "stiffness that improves with physical therapy"],
+    },
+    "abdominal_surgery": {
+        "emergency_signs": ["severe abdominal pain that is getting worse", "vomiting blood or material that looks like coffee grounds", "blood in stool or black tarry stools", "fever above 101.5°F with chills", "unable to keep any fluids down for 12 hours", "no bowel movement or gas for 3 days"],
+        "urgent_signs": ["incision is opening or separating", "redness spreading from incision site", "fever above 100.4°F", "increasing pain not relieved by prescribed medication", "persistent nausea or vomiting"],
+        "expected_symptoms": ["gas pain and bloating for several days", "constipation from pain medications", "decreased appetite", "fatigue", "mild bruising around incision"],
+    },
+    "pneumonia": {
+        "emergency_signs": ["severe difficulty breathing", "chest pain when breathing", "confusion or altered mental status", "lips or fingernails turning blue", "coughing up large amounts of blood"],
+        "urgent_signs": ["fever that returns after improving", "shortness of breath with minimal activity", "cough that is getting worse instead of better", "unable to keep fluids down"],
+        "expected_symptoms": ["cough that gradually improves over 2-3 weeks", "fatigue for several weeks", "mild shortness of breath with activity that improves daily"],
+    },
+    "heart_failure": {
+        "emergency_signs": ["severe shortness of breath", "chest pain", "fainting", "coughing up pink or bloody mucus"],
+        "urgent_signs": ["weight gain of more than 2-3 pounds in one day or 5 pounds in one week", "increased swelling in legs, ankles, or abdomen", "waking up at night short of breath", "needing more pillows to sleep comfortably", "new or worsening cough"],
+        "expected_symptoms": ["some shortness of breath with activity", "mild fatigue", "need to urinate more often when taking diuretics"],
+    },
+    "stroke": {
+        "emergency_signs": ["new weakness or numbness on one side", "new difficulty speaking or understanding speech", "new vision problems", "severe headache unlike any before", "new difficulty walking or loss of balance"],
+        "urgent_signs": ["dizziness that does not go away", "confusion or memory problems getting worse", "difficulty swallowing"],
+        "expected_symptoms": ["fatigue, especially in the first few weeks", "emotional changes", "gradual improvement in strength and coordination with therapy"],
+    },
+    "general_surgery": {
+        "emergency_signs": ["severe pain not relieved by medication", "heavy bleeding from incision", "fever above 101.5°F", "difficulty breathing", "chest pain"],
+        "urgent_signs": ["fever above 100.4°F", "redness, swelling, or pus from incision", "incision opening up", "persistent vomiting", "unable to urinate"],
+        "expected_symptoms": ["mild to moderate pain around incision", "fatigue", "bruising near incision", "constipation"],
+    },
+}
+
+# ── Helper: symptom severity assessment ───────────────────────────────────────
+
+def _assess_symptom_severity(symptom: str, severity: int, condition_data: dict) -> dict:
+    symptom_lower = symptom.lower()
+    for sign in condition_data.get("emergency_signs", []):
+        if any(word in symptom_lower for word in sign.lower().split()):
+            if severity >= 7:
+                return {"level": "emergency", "reason": f"This matches: {sign}"}
+    for sign in condition_data.get("urgent_signs", []):
+        if any(word in symptom_lower for word in sign.lower().split()):
+            if severity >= 5:
+                return {"level": "urgent", "reason": f"This could indicate: {sign}"}
+            return {"level": "monitor", "reason": f"This may be related to: {sign}. Monitor closely."}
+    if severity >= 8:
+        return {"level": "urgent", "reason": f"Severe symptom (severity {severity}/10) requires medical attention."}
+    if severity >= 5:
+        return {"level": "monitor", "reason": f"Moderate symptom (severity {severity}/10). Monitor and rest."}
+    return {"level": "normal", "reason": "Mild symptom within expected range."}
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+
+@tool
+def parse_discharge_instructions(user_id: int, discharge_text: str) -> str:
+    """Parse discharge instructions and extract medications, appointments, and care instructions,
+    then save them to the database. Use this when a patient shares or uploads their discharge paperwork."""
+
+    prompt = f"""
+You are a medical discharge parser.
+
+Extract structured information from the discharge instructions below.
+
+Return ONLY valid JSON in this format (no markdown fences, no extra text):
+
+{{
+    "medications": [
+        {{"name": "string", "dosage": "string", "schedule": "string"}}
+    ],
+    "appointments": [
+        {{"datetime": "string or null", "reason": "string"}}
+    ],
+    "care_instructions": ["string"]
+}}
+
+Discharge Instructions:
+{discharge_text}
+"""
+    try:
+        response = _genai_model.generate_content(prompt)
+        raw = response.text.strip()
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(raw)
+    except Exception as e:
+        return f"⚠️ Parsing failed: {str(e)}"
+
+    for med in parsed.get("medications", []):
+        _add_medication(user_id, med.get("name"), med.get("dosage"), med.get("schedule"))
+
+    calendar_errors = []
+    for appt in parsed.get("appointments", []):
+        dt_string = appt.get("datetime")
+        reason = appt.get("reason")
+        if dt_string:
+            try:
+                appointment_time = date_parser.parse(dt_string, default=datetime(datetime.now().year, 1, 1))
+                _create_appointment_db(user_id, appointment_time, reason)
+            except Exception as e:
+                calendar_errors.append(f"{reason}: {str(e)}")
+
+    for instruction in parsed.get("care_instructions", []):
+        _add_discharge_instruction(user_id, instruction)
+
+    result = (
+        "✅ Discharge instructions processed.\n"
+        f"- Medications added: {len(parsed.get('medications', []))}\n"
+        f"- Appointments scheduled: {len(parsed.get('appointments', []))}\n"
+        f"- Care instructions saved: {len(parsed.get('care_instructions', []))}"
+    )
+    if calendar_errors:
+        result += f"\n⚠️ Calendar sync failed for: {', '.join(calendar_errors)}"
+    return result
+
+
+@tool
+def schedule_appointment(user_id: int, appointment_datetime: str, reason: str) -> str:
+    """Schedule a follow-up appointment for a patient and sync it to Google Calendar.
+    appointment_datetime should be a human-readable date/time string like 'March 20 at 2 PM'."""
+    try:
+        appointment_time = date_parser.parse(appointment_datetime)
+    except Exception:
+        return f"❌ Could not parse date: '{appointment_datetime}'. Please provide a clearer date and time."
+
+    appt_id = _create_appointment_db(user_id, appointment_time, reason)
+    result = f"✅ Appointment saved to database for {appointment_time.strftime('%B %d, %Y at %I:%M %p')} — {reason} (ID: {appt_id})"
+    return result
+
+
+@tool
+def get_appointments(user_id: int) -> str:
+    """Get all upcoming appointments for a patient."""
+    rows = _get_appointments(user_id)
+    if not rows:
+        return "No appointments scheduled."
+    lines = ["📅 Upcoming Appointments:"]
+    for row in rows:
+        appt_time = row[1].strftime("%B %d, %Y at %I:%M %p") if hasattr(row[1], "strftime") else str(row[1])
+        lines.append(f"  • {row[2] or 'Follow-up'} — {appt_time}")
+    return "\n".join(lines)
+
+
+@tool
+def log_symptom_check(user_id: int, symptom: str, severity: int, condition_type: Optional[str] = None) -> str:
+    """Log a symptom for a patient and assess if it requires medical attention.
+    severity is 1-10 (1=mild, 10=severe).
+    condition_type options: cardiac_surgery, joint_replacement, abdominal_surgery, pneumonia, heart_failure, stroke, general_surgery."""
+
+    try:
+        _log_symptom(user_id, symptom, severity)
+    except Exception as e:
+        return f"❌ Error logging symptom: {str(e)}"
+
+    response = [f"✅ Symptom logged: '{symptom}' (Severity: {severity}/10)"]
+
+    if condition_type and condition_type.lower() in WARNING_SIGNS_DB:
+        condition_data = WARNING_SIGNS_DB[condition_type.lower()]
+        assessment = _assess_symptom_severity(symptom.lower(), severity, condition_data)
+
+        if assessment["level"] == "emergency":
+            response += [
+                "\n🚨 EMERGENCY WARNING 🚨",
+                f"  {assessment['reason']}",
+                "\nCall 911 or go to the nearest ER immediately.",
+            ]
+        elif assessment["level"] == "urgent":
+            response += [
+                "\n⚠️ URGENT — Contact your doctor TODAY.",
+                f"  {assessment['reason']}",
+            ]
+        elif assessment["level"] == "monitor":
+            response += [
+                "\n📊 Monitor this symptom.",
+                f"  {assessment['reason']}",
+                "  Check again in 4-6 hours. Contact doctor if it worsens.",
+            ]
+        else:
+            response.append("\n✅ This appears to be a normal recovery symptom. Continue following your discharge plan.")
+
+    recent = _get_symptom_logs(user_id)
+    if len(recent) > 1:
+        response.append("\n📈 Recent Symptoms:")
+        for s, sev, t in recent[:3]:
+            t_str = t.strftime("%b %d, %I:%M %p") if hasattr(t, "strftime") else str(t)
+            response.append(f"  • {s} (Severity: {sev}/10) — {t_str}")
+
+    response += [
+        "\n📞 Emergency: Call 911 for severe symptoms.",
+        "📞 Non-emergency: Call your doctor's office during business hours.",
+    ]
+    return "\n".join(response)
+
+
+@tool
+def analyze_symptom_trends(user_id: int, days: int = 7) -> str:
+    """Analyze symptom trends for a patient over the past N days to identify patterns."""
+    all_symptoms = _get_symptom_logs(user_id)
+    if not all_symptoms:
+        return "No symptom data available yet."
+
+    cutoff = datetime.now() - timedelta(days=days)
+    recent = [(s, sev, t) for s, sev, t in all_symptoms if hasattr(t, "date") and t >= cutoff]
+    if not recent:
+        return f"No symptoms logged in the last {days} days."
+
+    symptom_data: Dict[str, List[int]] = {}
+    for s, sev, _ in recent:
+        symptom_data.setdefault(s, []).append(sev)
+
+    lines = [f"📊 Symptom Trend Analysis (Last {days} Days)", f"Total logged: {len(recent)}", ""]
+    for s, severities in symptom_data.items():
+        avg = sum(severities) / len(severities)
+        trend = "worsening 📈" if len(severities) > 1 and severities[-1] > severities[0] else \
+                "improving 📉" if len(severities) > 1 and severities[-1] < severities[0] else "stable ⚖️"
+        lines.append(f"  • {s}: avg {avg:.1f}/10, peak {max(severities)}/10 — {trend}")
+
+    severe = [s for s, sev in symptom_data.items() if max(sev) >= 7]
+    if severe:
+        lines += ["", f"🚨 High-severity symptoms: {', '.join(severe)}", "  Please contact your healthcare provider."]
+
+    return "\n".join(lines)
+
+
+@tool
+def create_medication_schedule(user_id: int) -> str:
+    """Create and display a daily medication reminder schedule for a patient based on their logged medications."""
+    medications = _get_medications(user_id)
+    if not medications:
+        return "No medications found. Please add medications first (e.g., by parsing discharge instructions)."
+
+    freq_to_times = {
+        "once": ["08:00"], "daily": ["08:00"],
+        "twice": ["08:00", "20:00"],
+        "three": ["08:00", "14:00", "20:00"],
+        "four": ["08:00", "12:00", "16:00", "20:00"],
+        "bedtime": ["22:00"],
+    }
+
+    lines = ["📋 YOUR DAILY MEDICATION SCHEDULE", "=" * 40]
+    reminder_count = 0
+
+    for med in medications:
+        med_name = med[0] or ""
+        dosage = med[1] or ""
+        frequency = (med[2] or "once daily").lower()
+
+        if "as needed" in frequency or "prn" in frequency:
+            times = []
+        elif "bedtime" in frequency:
+            times = ["22:00"]
+        elif "twice" in frequency:
+            times = ["08:00", "20:00"]
+        elif "three" in frequency:
+            times = ["08:00", "14:00", "20:00"]
+        elif "four" in frequency:
+            times = ["08:00", "12:00", "16:00", "20:00"]
+        else:
+            times = ["08:00"]
+
+        def fmt(t):
+            h, m = map(int, t.split(":"))
+            if h == 0:
+                return f"12:{m:02d} AM"
+            elif h < 12:
+                return f"{h}:{m:02d} AM"
+            elif h == 12:
+                return f"12:{m:02d} PM"
+            else:
+                return f"{h - 12}:{m:02d} PM"
+
+        display_times = ", ".join(fmt(t) for t in times) if times else "As needed"
+        lines += [f"\n💊 {med_name.upper()} {dosage}", f"   Frequency: {frequency}", f"   Times: {display_times}"]
+
+        now = datetime.now()
+        for time_str in times:
+            h, m = map(int, time_str.split(":"))
+            remind_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if remind_at < now:
+                remind_at += timedelta(days=1)
+            try:
+                _add_reminder(user_id, "medication", f"Take {dosage} of {med_name}", remind_at)
+                reminder_count += 1
+            except Exception:
+                pass
+
+    lines += ["", "=" * 40, f"✅ {reminder_count} reminders created.", "⚠️ Set phone alarms as backup!"]
+    return "\n".join(lines)
+
+
+@tool
+def get_medication_info(medication_name: str) -> str:
+    """Look up information about a specific medication including its purpose, side effects, warnings, and food instructions."""
+    name = medication_name.lower().strip()
+    info = MEDICATIONS_DB.get(name)
+    if not info:
+        return f"No information found for '{medication_name}'. Please check the spelling or consult your pharmacist."
+    return (
+        f"💊 {name.title()}\n"
+        f"Purpose: {info['purpose']}\n"
+        f"Side effects: {info['common_side_effects']}\n"
+        f"⚠️ Warnings: {info['warnings']}\n"
+        f"🍽️ Food: {info['food_instructions']}"
+    )
+
+
+@tool
+def generate_visit_summary(user_id: int) -> str:
+    """Generate a concise doctor-visit summary based on the patient's recent symptoms, medications, and upcoming appointments."""
+    symptoms = _get_symptom_logs(user_id)
+    medications = _get_medications(user_id)
+    appointments = _get_appointments(user_id)
+
+    symptom_str = "\n".join(
+        f"- {s[0]} (Severity: {s[1]}/10) on {s[2].strftime('%b %d, %Y') if hasattr(s[2], 'strftime') else s[2]}"
+        for s in symptoms[:10]
+    ) or "No symptoms logged."
+
+    med_str = "\n".join(
+        f"- {m[0]} {m[1] or ''}: {m[2] or ''}" for m in medications
+    ) or "No medications listed."
+
+    appt_str = "\n".join(
+        f"- {a[2] or 'Follow-up'} on {a[1].strftime('%b %d, %Y at %I:%M %p') if hasattr(a[1], 'strftime') else a[1]}"
+        for a in appointments
+    ) or "No upcoming appointments."
+
+    prompt = f"""
+You are a medical assistant helping a patient prepare for a doctor's visit.
+
+SYMPTOMS (Recent):
+{symptom_str}
+
+CURRENT MEDICATIONS:
+{med_str}
+
+UPCOMING APPOINTMENTS:
+{appt_str}
+
+Please provide a concise visit summary with:
+- Overall health trend (improving/worsening/stable)
+- Key concerns to discuss (2-3 bullet points)
+- Suggested questions for the doctor (2-3)
+- What to bring to the appointment
+"""
+    try:
+        response = _genai_model.generate_content(prompt)
+        return f"📊 VISIT SUMMARY\n{'─'*40}\n{response.text}"
+    except Exception as e:
+        return f"❌ Error generating summary: {str(e)}"
+
+
+@tool
+def get_discharge_instructions(user_id: int) -> str:
+    """Retrieve the saved discharge instructions for a patient from the database."""
+    rows = _get_discharge_instructions(user_id)
+    if not rows:
+        return "No discharge instructions found. Try parsing discharge paperwork first."
+    lines = ["📋 Discharge Instructions:"]
+    for row in rows:
+        lines.append(f"  • {row[1]}")
+    return "\n".join(lines)
+
+
+@tool
+def consult_discharge_instructions_pdf(query: str, pdf_path: str = "discharge_summary.pdf") -> str:
+    """Answer a specific question about a patient's discharge instructions from a PDF file.
+    Use this when the patient asks questions about their recovery plan, diet restrictions, or wound care."""
+    try:
+        reader = PdfReader(pdf_path)
+        text = "".join(page.extract_text() for page in reader.pages)
+    except FileNotFoundError:
+        return "No discharge PDF found. Please upload your discharge instructions file."
+    except Exception as e:
+        return f"Error reading PDF: {str(e)}"
+
+    prompt = f"""
+Based on the following discharge instructions, answer the patient's question.
+
+DISCHARGE INSTRUCTIONS:
+{text[:3000]}
+
+PATIENT'S QUESTION:
+{query}
+
+Provide a clear, helpful answer based ONLY on the discharge instructions.
+If the answer is not found, say so and suggest contacting their doctor.
+"""
+    try:
+        response = _genai_model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Error generating answer: {str(e)}"
+
+
+@tool
+def lookup_medical_reference(topic: str) -> str:
+    """Look up medication information or warning signs for a medical condition from the internal reference database.
+    Use this when a patient asks about a medication or what symptoms to watch for after their procedure."""
+    topic_lower = topic.lower().strip()
+
+    if topic_lower in MEDICATIONS_DB:
+        info = MEDICATIONS_DB[topic_lower]
+        return f"💊 {topic_lower.title()}:\n" + "\n".join(f"  • {k}: {v}" for k, v in info.items())
+
+    for condition, data in WARNING_SIGNS_DB.items():
+        if topic_lower in condition.replace("_", " "):
+            lines = [f"⚠️ {condition.replace('_', ' ').title()} Warning Signs:", "🚨 EMERGENCY:"]
+            lines += [f"  • {s}" for s in data.get("emergency_signs", [])[:3]]
+            lines += ["⚠️ URGENT:"]
+            lines += [f"  • {s}" for s in data.get("urgent_signs", [])[:3]]
+            lines += ["✅ Expected (normal):"]
+            lines += [f"  • {s}" for s in data.get("expected_symptoms", [])[:3]]
+            return "\n".join(lines)
+
+    partial = [f"💊 {k.title()}: {v.get('purpose', '')}" for k, v in MEDICATIONS_DB.items() if topic_lower in k]
+    if partial:
+        return "Related medications found:\n" + "\n".join(partial[:3])
+
+    return "No specific reference found. Please consult your healthcare provider."
+
+# ── System Prompt ──────────────────────────────────────────────────────────────
+
+system_prompt = """You are CareCompanion, a supportive AI healthcare assistant for recently discharged patients and their caregivers.
+
+Your goal is to help patients manage their post-discharge recovery by:
+- Answering questions about their medications and care instructions
+- Logging and monitoring their symptoms over time
+- Scheduling and tracking follow-up appointments
+- Generating visit summaries to prepare for doctor appointments
+- Providing guidance based on their specific medical condition
+
+CRITICAL RULES — you must follow these exactly:
+- Each message begins with [user_id=N]. You MUST extract that number and use it as user_id for every single tool call. Never use any other user_id.
+- NEVER summarize or acknowledge discharge information from memory. You MUST call parse_discharge_instructions first, then report what the tool returned.
+- NEVER confirm that an appointment was scheduled unless schedule_appointment or parse_discharge_instructions tool actually returned a success message.
+- NEVER confirm that a symptom was logged unless log_symptom_check tool actually returned a success message.
+- If a patient shares any text that looks like discharge paperwork (medications, appointments, instructions), you MUST call parse_discharge_instructions immediately before responding.
+- For any emergency symptoms (chest pain, difficulty breathing, fainting), immediately tell the patient to call 911.
+- Never provide a medical diagnosis — you support care, you don't replace doctors.
+
+Tool usage rules:
+- parse_discharge_instructions: Call this IMMEDIATELY when patient shares any discharge text. Do not respond without calling it first.
+- schedule_appointment: Call this when patient asks to book a specific appointment with a date and time.
+- get_appointments: Call this when patient asks about upcoming visits.
+- get_discharge_instructions: Call this when patient asks to review their care instructions.
+- log_symptom_check: Call this when patient reports any symptom. Always include user_id, symptom, and severity.
+- analyze_symptom_trends: Call this when patient wants to review how they have been feeling over time.
+- create_medication_schedule: Call this when patient wants their daily medication plan.
+- get_medication_info: Call this when patient asks about a specific medication.
+- generate_visit_summary: Call this when patient is preparing for a doctor visit. Return the full tool output verbatim with no intro sentence — do not add any text before or after it.
+- consult_discharge_instructions_pdf: Call this when patient asks a specific question about their discharge PDF file.
+- lookup_medical_reference: Call this when patient asks about medication side effects or condition warning signs.
+"""
+
+# ── Agent ──────────────────────────────────────────────────────────────────────
+
+tools = [
+    parse_discharge_instructions,
+    schedule_appointment,
+    get_appointments,
+    get_discharge_instructions,
+    log_symptom_check,
+    analyze_symptom_trends,
+    create_medication_schedule,
+    get_medication_info,
+    generate_visit_summary,
+    consult_discharge_instructions_pdf,
+    lookup_medical_reference,
+]
+
+agent = create_react_agent(
+    model=llm,
+    tools=tools,
+    prompt=system_prompt,
+)
