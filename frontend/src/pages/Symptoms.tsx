@@ -182,11 +182,11 @@ export default function Symptoms() {
           ) : (
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={data?.trend ?? []} margin={{ top: 4, right: 4, bottom: 4, left: -24 }}>
-                <XAxis dataKey="date" tickFormatter={d => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                <XAxis dataKey="date" tickFormatter={d => new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                   tick={{ fontSize: 10, fill: 'var(--text-muted)' }} />
                 <YAxis domain={[0, 10]} tick={{ fontSize: 10, fill: 'var(--text-muted)' }} />
                 <Tooltip formatter={(v) => [`${v}/10`, 'Avg Severity']}
-                  labelFormatter={d => new Date(d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} />
+                  labelFormatter={d => new Date(`${d}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} />
                 <Bar dataKey="avg_severity" radius={[4, 4, 0, 0]}>
                   {(data?.trend ?? []).map((entry: { avg_severity: number }, i: number) => (
                     <Cell key={i} fill={entry.avg_severity <= 3 ? '#22c55e' : entry.avg_severity <= 6 ? '#f59e0b' : '#ef4444'} />

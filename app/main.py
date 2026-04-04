@@ -274,7 +274,7 @@ async def health_check():
 # ── Symptoms ───────────────────────────────────────────────────────────────────
 
 @app.get("/symptoms/{user_id}")
-async def get_symptoms(user_id: int, local_date: Optional[str] = None, utc_offset: Optional[int] = 0):
+async def get_symptoms(user_id: int, local_date: Optional[str] = None, utc_offset_minutes: Optional[int] = 0):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -282,9 +282,9 @@ async def get_symptoms(user_id: int, local_date: Optional[str] = None, utc_offse
             today = date.fromisoformat(local_date) if local_date else date.today()
         except ValueError:
             today = date.today()
-        # Use UTC window based on local date + offset
-        utc_offset_hours = int(utc_offset or 0)
-        utc_start = datetime.combine(today, datetime.min.time()) - timedelta(hours=utc_offset_hours)
+        # Convert local midnight to UTC using exact minute offset
+        offset = timedelta(minutes=int(utc_offset_minutes or 0))
+        utc_start = datetime.combine(today, datetime.min.time()) - offset
         utc_end = utc_start + timedelta(hours=24)
         cur.execute("""
             SELECT symptom_id, symptom, severity, condition_type, logged_at
@@ -302,7 +302,7 @@ async def get_symptoms(user_id: int, local_date: Optional[str] = None, utc_offse
         trend = []
         for i in range(6, -1, -1):
             d = today - timedelta(days=i)
-            d_start = datetime.combine(d, datetime.min.time()) - timedelta(hours=utc_offset_hours)
+            d_start = datetime.combine(d, datetime.min.time()) - offset
             d_end = d_start + timedelta(hours=24)
             cur.execute("""
                 SELECT AVG(severity), COUNT(*)
