@@ -116,20 +116,26 @@ export default function Dashboard() {
           <p style={{ fontSize: 13, opacity: 0.75, lineHeight: 1.6, maxWidth: 380 }}>
             Here's an overview of your care today. Stay on track with your recovery.
           </p>
-          {!calendarConnected && (
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
             <button onClick={handleConnectCalendar} style={{
-              marginTop: 12, background: 'rgba(255,255,255,0.15)',
+              background: calendarConnected ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.15)',
               border: '1px solid rgba(255,255,255,0.4)',
               borderRadius: 8, padding: '8px 16px', fontSize: 12,
               color: '#fff', cursor: 'pointer', fontFamily: 'var(--font-body)',
               display: 'flex', alignItems: 'center', gap: 6,
             }}>
-              📅 Connect Google Calendar
+              {calendarConnected ? '✓ Google Calendar connected' : '📅 Connect Google Calendar'}
             </button>
-          )}
-          {calendarConnected && (
-            <p style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>✓ Google Calendar connected</p>
-          )}
+            {calendarConnected && (
+              <button onClick={handleConnectCalendar} style={{
+                background: 'transparent', border: 'none', padding: 0,
+                fontSize: 12, color: 'rgba(255,255,255,0.5)', cursor: 'pointer',
+                fontFamily: 'var(--font-body)', textDecoration: 'underline',
+              }}>
+                Reconnect
+              </button>
+            )}
+          </div>
         </div>
         <div style={{ fontSize: 64, opacity: 0.15, userSelect: 'none' }}>🏥</div>
       </div>
