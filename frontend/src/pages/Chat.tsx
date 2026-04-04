@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
 import ChatBubble from '../components/ChatBubble'
@@ -8,7 +9,8 @@ import QuickActions from '../components/QuickActions'
 
 export default function Chat() {
   const { user } = useAuth()
-  const { messages, isLoading, isEmergency, sendMessage, dismissEmergency } = useChat()
+  const { activeSession, messages, isLoading, isEmergency, sendMessage, dismissEmergency, createNewSession } = useChat()
+  const navigate = useNavigate()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -30,6 +32,11 @@ export default function Chat() {
     setInput('')
     if (inputRef.current) inputRef.current.style.height = 'auto'
     sendMessage(text)
+  }
+
+  function handleNewChat() {
+    createNewSession()
+    navigate('/chat')
   }
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -68,6 +75,56 @@ export default function Chat() {
       animation: 'fadeUp 0.35s ease forwards',
     }}>
       {isEmergency && <EmergencyAlert onDismiss={dismissEmergency} />}
+
+      {/* Session title bar */}
+      {activeSession && (
+        <div style={{
+          flexShrink: 0,
+          padding: '10px 20px 0',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 12,
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            minWidth: 0,
+          }}>
+            <span style={{ fontSize: 14 }}>💬</span>
+            <span style={{
+              fontSize: 13, fontWeight: 600,
+              color: 'var(--navy)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              maxWidth: 360,
+            }}>
+              {activeSession.title}
+            </span>
+            <span style={{
+              fontSize: 11, color: 'var(--text-light)',
+              background: 'var(--surface-2)',
+              border: '1px solid var(--border)',
+              borderRadius: 20, padding: '1px 8px',
+              whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+              {messages.length} message{messages.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <button
+            onClick={handleNewChat}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: 'transparent',
+              border: '1.5px solid var(--border)',
+              borderRadius: 8, padding: '5px 12px',
+              color: 'var(--text-muted)', fontSize: 12, fontWeight: 500,
+              cursor: 'pointer', fontFamily: 'var(--font-body)',
+              transition: 'all 0.15s', flexShrink: 0,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; e.currentTarget.style.background = 'var(--blue-light)' }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent' }}
+          >
+            <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> New chat
+          </button>
+        </div>
+      )}
 
       {/* Upload banner */}
       {uploadBanner && (
