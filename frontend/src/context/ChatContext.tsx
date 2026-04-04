@@ -73,11 +73,14 @@ function generateTitle(firstMessage: string): string {
   return trimmed.slice(0, 39) + '\u2026'
 }
 
-const STORAGE_KEY = 'care_companion_chats'
+const SESSIONS_KEY = (userId?: string | number) =>
+  userId ? `care_companion_chats_${userId}` : 'care_companion_chats'
+const ACTIVE_KEY = (userId?: string | number) =>
+  userId ? `care_companion_active_${userId}` : 'care_companion_active'
 
-function loadSessions(): ChatSession[] {
+function loadSessions(userId?: string | number): ChatSession[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(SESSIONS_KEY(userId))
     if (!raw) return []
     return JSON.parse(raw) as ChatSession[]
   } catch {
@@ -85,27 +88,70 @@ function loadSessions(): ChatSession[] {
   }
 }
 
-function saveSessions(sessions: ChatSession[]) {
+function saveSessions(sessions: ChatSession[], userId?: string | number) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions))
+    localStorage.setItem(SESSIONS_KEY(userId), JSON.stringify(sessions))
   } catch {
     // Storage quota exceeded or unavailable
   }
 }
 
+function loadActiveId(userId?: string | number): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_KEY(userId))
+  } catch {
+    return null
+  }
+}
+
+function saveActiveId(id: string | null, userId?: string | number) {
+  try {
+    if (id) {
+      localStorage.setItem(ACTIVE_KEY(userId), id)
+    } else {
+      localStorage.removeItem(ACTIVE_KEY(userId))
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export function ChatProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
-  const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions())
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
-    const stored = loadSessions()
+  const userId = user?.userId
+
+  const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions(userId))
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(() => {
+    const stored = loadSessions(userId)
+    const savedActive = loadActiveId(userId)
+    if (savedActive && stored.find(s => s.id === savedActive)) return savedActive
     return stored.length > 0 ? stored[0].id : null
   })
   const [isLoading, setIsLoading] = useState(false)
   const [isEmergency, setIsEmergency] = useState(false)
 
+  // Re-hydrate when user changes (login/logout)
   useEffect(() => {
-    saveSessions(sessions)
-  }, [sessions])
+    const stored = loadSessions(userId)
+    setSessions(stored)
+    const savedActive = loadActiveId(userId)
+    if (savedActive && stored.find(s => s.id === savedActive)) {
+      setActiveSessionIdState(savedActive)
+    } else {
+      setActiveSessionIdState(stored.length > 0 ? stored[0].id : null)
+    }
+  }, [userId])
+
+  // Persist sessions whenever they change
+  useEffect(() => {
+    saveSessions(sessions, userId)
+  }, [sessions, userId])
+
+  // Persist active session id whenever it changes
+  function setActiveSessionId(id: string | null) {
+    setActiveSessionIdState(id)
+    saveActiveId(id, userId)
+  }
 
   const activeSession = sessions.find(s => s.id === activeSessionId) ?? null
   const messages = activeSession?.messages ?? []
@@ -122,25 +168,30 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setSessions(prev => [session, ...prev])
     setActiveSessionId(id)
     return id
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   const switchSession = useCallback((id: string) => {
     setActiveSessionId(id)
     setIsEmergency(false)
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   const deleteSession = useCallback((id: string) => {
     setSessions(prev => {
       const next = prev.filter(s => s.id !== id)
-      saveSessions(next)
+      saveSessions(next, userId)
       return next
     })
-    setActiveSessionId(prev => {
+    setActiveSessionIdState(prev => {
       if (prev !== id) return prev
-      const remaining = loadSessions().filter(s => s.id !== id)
-      return remaining.length > 0 ? remaining[0].id : null
+      const remaining = loadSessions(userId).filter(s => s.id !== id)
+      const nextId = remaining.length > 0 ? remaining[0].id : null
+      saveActiveId(nextId, userId)
+      return nextId
     })
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
 
   const renameSession = useCallback((id: string, title: string) => {
     setSessions(prev =>
