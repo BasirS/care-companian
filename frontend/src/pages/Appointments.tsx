@@ -348,7 +348,7 @@ export default function Appointments() {
   const userId = user!.userId
   const { data, loading, refetch } = useApi(() => getAppointments(userId), [userId])
 
-  const [tab, setTab] = useState<'upcoming' | 'completed' | 'calendar'>('upcoming')
+  const [tab, setTab] = useState<'upcoming' | 'completed' | 'calendar'>('calendar')
   const [showAdd, setShowAdd] = useState(false)
   const [addForm, setAddForm] = useState({
     appointment_time: '', reason: '', location: '', appointment_type: 'follow-up',
@@ -421,6 +421,15 @@ export default function Appointments() {
       {/* Header with tabs + add button */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 4, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10, padding: 4 }}>
+          <button onClick={() => setTab('calendar')} style={{
+            padding: '7px 18px', borderRadius: 7, border: 'none',
+            background: tab === 'calendar' ? 'var(--navy)' : 'transparent',
+            color: tab === 'calendar' ? '#fff' : 'var(--text-muted)',
+            fontSize: 13, fontWeight: tab === 'calendar' ? 600 : 400,
+            cursor: 'pointer', fontFamily: 'var(--font-body)', transition: 'all 0.15s',
+          }}>
+            Calendar View
+          </button>
           <button onClick={() => setTab('upcoming')} style={{
             padding: '7px 18px', borderRadius: 7, border: 'none',
             background: tab === 'upcoming' ? 'var(--navy)' : 'transparent',
@@ -438,15 +447,6 @@ export default function Appointments() {
             cursor: 'pointer', fontFamily: 'var(--font-body)', transition: 'all 0.15s',
           }}>
             Completed ({completed.length})
-          </button>
-          <button onClick={() => setTab('calendar')} style={{
-            padding: '7px 18px', borderRadius: 7, border: 'none',
-            background: tab === 'calendar' ? 'var(--navy)' : 'transparent',
-            color: tab === 'calendar' ? '#fff' : 'var(--text-muted)',
-            fontSize: 13, fontWeight: tab === 'calendar' ? 600 : 400,
-            cursor: 'pointer', fontFamily: 'var(--font-body)', transition: 'all 0.15s',
-          }}>
-            Calendar View
           </button>
         </div>
         <button onClick={() => setShowAdd(!showAdd)} style={{

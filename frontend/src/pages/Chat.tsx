@@ -9,7 +9,7 @@ import QuickActions from '../components/QuickActions'
 
 export default function Chat() {
   const { user } = useAuth()
-  const { activeSession, messages, isLoading, isEmergency, sendMessage, dismissEmergency, createNewSession } = useChat()
+  const { activeSession, messages, isLoading, isEmergency, sendMessage, sendSilentMessage, dismissEmergency, createNewSession } = useChat()
   const navigate = useNavigate()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -59,6 +59,14 @@ export default function Chat() {
         type: 'success',
         text: `✅ Discharge processed: ${data.medications_added} medication${data.medications_added !== 1 ? 's' : ''}, ${data.appointments_scheduled} appointment${data.appointments_scheduled !== 1 ? 's' : ''}, ${data.instructions_saved} instructions added.`,
       })
+      // Trigger agent reply in chat without showing a user bubble
+      sendSilentMessage(
+        `[DISCHARGE_UPLOAD] The patient just uploaded their discharge paper "${file.name}". ` +
+        `It was processed and the following was added to their profile: ` +
+        `${data.medications_added} medication(s), ${data.appointments_scheduled} appointment(s), ` +
+        `${data.instructions_saved} care instruction(s). ` +
+        `Please greet them, summarize what was found, and tell them everything you can help with.`
+      )
     } catch (err) {
       setUploadBanner({ type: 'error', text: err instanceof Error ? err.message : 'Upload failed.' })
     } finally {
@@ -169,7 +177,23 @@ export default function Chat() {
         ) : (
           messages.map(msg => <ChatBubble key={msg.id} message={msg} />)
         )}
-        {isLoading && <TypingIndicator />}
+        {uploading && (
+          <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5 }}>
+            <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', padding: '0 4px' }}>CareCompanion</span>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: '16px 16px 16px 4px', boxShadow: 'var(--shadow-sm)',
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1.2s linear infinite', flexShrink: 0 }}>
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              <span style={{ fontSize: 13, color: 'var(--text-mid)' }}>Reading your discharge paperwork…</span>
+            </div>
+          </div>
+        )}
+        {!uploading && isLoading && <TypingIndicator />}
         <div ref={messagesEndRef} />
       </div>
 

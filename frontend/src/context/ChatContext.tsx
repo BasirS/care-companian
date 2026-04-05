@@ -25,6 +25,7 @@ interface ChatContextType {
   isLoading: boolean
   isEmergency: boolean
   sendMessage: (text: string) => Promise<void>
+  sendSilentMessage: (text: string) => Promise<void>
   dismissEmergency: () => void
   clearMessages: () => void
   createNewSession: () => string
@@ -41,6 +42,7 @@ const ChatContext = createContext<ChatContextType>({
   isLoading: false,
   isEmergency: false,
   sendMessage: async () => {},
+  sendSilentMessage: async () => {},
   dismissEmergency: () => {},
   clearMessages: () => {},
   createNewSession: () => '',
@@ -266,6 +268,52 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  async function sendSilentMessage(text: string) {
+    // Sends text to the agent but adds NO user bubble — only the agent reply appears
+    let sessionId = activeSessionId
+    if (!sessionId) {
+      sessionId = newId('session')
+      const session: ChatSession = {
+        id: sessionId,
+        title: 'Discharge Summary',
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      setSessions(prev => [session, ...prev])
+      setActiveSessionId(sessionId)
+    }
+    const capturedId = sessionId
+    setIsLoading(true)
+    try {
+      const response = await sendChatMessage(text, user?.email, user?.name)
+      const agentMsg: Message = { id: newId(), role: 'agent', text: response, timestamp: Date.now() }
+      setSessions(prev =>
+        prev.map(s =>
+          s.id === capturedId
+            ? { ...s, messages: [...s.messages, agentMsg], updatedAt: Date.now() }
+            : s
+        )
+      )
+      if (isEmergencyResponse(response)) setIsEmergency(true)
+    } catch (err) {
+      const errorMsg: Message = {
+        id: newId(), role: 'agent',
+        text: err instanceof Error ? `⚠️ ${err.message}` : '⚠️ Something went wrong.',
+        timestamp: Date.now(),
+      }
+      setSessions(prev =>
+        prev.map(s =>
+          s.id === capturedId
+            ? { ...s, messages: [...s.messages, errorMsg], updatedAt: Date.now() }
+            : s
+        )
+      )
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
   function dismissEmergency() { setIsEmergency(false) }
   function clearMessages() {
     if (!activeSessionId) return
@@ -279,7 +327,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   return (
     <ChatContext.Provider value={{
       sessions, activeSessionId, activeSession, messages,
-      isLoading, isEmergency, sendMessage, dismissEmergency,
+      isLoading, isEmergency, sendMessage, sendSilentMessage, dismissEmergency,
       clearMessages, createNewSession, switchSession, deleteSession, renameSession,
     }}>
       {children}
