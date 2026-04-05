@@ -22,6 +22,9 @@ export default defineConfig({
       '/upload-discharge': 'http://localhost:8000',
       '/discharge-uploads': 'http://localhost:8000',
       '/auth': 'http://localhost:8000',
+      '/users': 'http://localhost:8000',
+      '/emergency-contacts': 'http://localhost:8000',
+      '/care-team': 'http://localhost:8000',
     },
   },
 })

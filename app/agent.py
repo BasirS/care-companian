@@ -248,6 +248,25 @@ def init_db():
         )""",
         "ALTER TABLE visit_summaries ADD COLUMN IF NOT EXISTS source_upload_id INTEGER REFERENCES discharge_uploads(upload_id) ON DELETE SET NULL",
         "ALTER TABLE discharge_uploads ADD COLUMN IF NOT EXISTS pdf_bytes BYTEA",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS blood_type TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS allergies TEXT",
+        """CREATE TABLE IF NOT EXISTS emergency_contacts (
+            contact_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            relationship TEXT,
+            phone TEXT,
+            email TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS care_team (
+            member_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            role TEXT,
+            specialty TEXT,
+            phone TEXT,
+            hospital TEXT
+        )""",
     ]
     for sql in migrations:
         cur.execute(sql)

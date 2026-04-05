@@ -67,6 +67,34 @@ class ProfileUpdateRequest(BaseModel):
     patient_id_number: Optional[str] = None
     insurance_id: Optional[str] = None
     medical_history: Optional[str] = None
+    blood_type: Optional[str] = None
+    allergies: Optional[str] = None
+
+class EmergencyContactRequest(BaseModel):
+    name: str
+    relationship: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+class EmergencyContactUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    relationship: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+class CareTeamMemberRequest(BaseModel):
+    name: str
+    role: Optional[str] = None
+    specialty: Optional[str] = None
+    phone: Optional[str] = None
+    hospital: Optional[str] = None
+
+class CareTeamMemberUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    specialty: Optional[str] = None
+    phone: Optional[str] = None
+    hospital: Optional[str] = None
 
 class LogSymptomRequest(BaseModel):
     symptom: str
@@ -236,6 +264,7 @@ async def get_profile(user_id: int):
             SELECT user_id, name, email, phone, date_of_birth, gender,
                    primary_condition, reminder_preference, preferred_time,
                    location, patient_id_number, insurance_id, medical_history,
+                   blood_type, allergies,
                    onboarded, google_refresh_token, created_at
             FROM users WHERE user_id = %s
         """, (user_id,))
@@ -245,6 +274,7 @@ async def get_profile(user_id: int):
         keys = ["user_id","name","email","phone","date_of_birth","gender",
                 "primary_condition","reminder_preference","preferred_time",
                 "location","patient_id_number","insurance_id","medical_history",
+                "blood_type","allergies",
                 "onboarded","google_refresh_token","created_at"]
         profile = dict(zip(keys, row))
         # Serialize non-JSON-serializable types
@@ -976,6 +1006,139 @@ async def upload_discharge(user_id: int = Form(...), file: UploadFile = File(...
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+# ── Emergency Contacts ─────────────────────────────────────────────────────────
+
+@app.get("/users/{user_id}/emergency-contacts")
+async def get_emergency_contacts(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT contact_id, name, relationship, phone, email FROM emergency_contacts WHERE user_id = %s ORDER BY contact_id", (user_id,))
+        rows = cur.fetchall()
+        return [{"contact_id": r[0], "name": r[1], "relationship": r[2], "phone": r[3], "email": r[4]} for r in rows]
+    finally:
+        cur.close(); conn.close()
+
+@app.post("/users/{user_id}/emergency-contacts")
+async def add_emergency_contact(user_id: int, req: EmergencyContactRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO emergency_contacts (user_id, name, relationship, phone, email) VALUES (%s,%s,%s,%s,%s) RETURNING contact_id",
+            (user_id, req.name, req.relationship, req.phone, req.email)
+        )
+        contact_id = cur.fetchone()[0]
+        conn.commit()
+        return {"contact_id": contact_id, "name": req.name, "relationship": req.relationship, "phone": req.phone, "email": req.email}
+    finally:
+        cur.close(); conn.close()
+
+@app.put("/emergency-contacts/{contact_id}")
+async def update_emergency_contact(contact_id: int, req: EmergencyContactUpdateRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        fields = req.model_dump(exclude_none=True)
+        if fields:
+            set_clause = ", ".join(f"{k} = %s" for k in fields)
+            cur.execute(f"UPDATE emergency_contacts SET {set_clause} WHERE contact_id = %s", list(fields.values()) + [contact_id])
+            conn.commit()
+        return {"success": True}
+    finally:
+        cur.close(); conn.close()
+
+@app.delete("/emergency-contacts/{contact_id}")
+async def delete_emergency_contact(contact_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM emergency_contacts WHERE contact_id = %s", (contact_id,))
+        conn.commit()
+        return {"success": True}
+    finally:
+        cur.close(); conn.close()
+
+# ── Care Team ──────────────────────────────────────────────────────────────────
+
+@app.get("/users/{user_id}/care-team")
+async def get_care_team(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT member_id, name, role, specialty, phone, hospital FROM care_team WHERE user_id = %s ORDER BY member_id", (user_id,))
+        rows = cur.fetchall()
+        return [{"member_id": r[0], "name": r[1], "role": r[2], "specialty": r[3], "phone": r[4], "hospital": r[5]} for r in rows]
+    finally:
+        cur.close(); conn.close()
+
+@app.post("/users/{user_id}/care-team")
+async def add_care_team_member(user_id: int, req: CareTeamMemberRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO care_team (user_id, name, role, specialty, phone, hospital) VALUES (%s,%s,%s,%s,%s,%s) RETURNING member_id",
+            (user_id, req.name, req.role, req.specialty, req.phone, req.hospital)
+        )
+        member_id = cur.fetchone()[0]
+        conn.commit()
+        return {"member_id": member_id, "name": req.name, "role": req.role, "specialty": req.specialty, "phone": req.phone, "hospital": req.hospital}
+    finally:
+        cur.close(); conn.close()
+
+@app.put("/care-team/{member_id}")
+async def update_care_team_member(member_id: int, req: CareTeamMemberUpdateRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        fields = req.model_dump(exclude_none=True)
+        if fields:
+            set_clause = ", ".join(f"{k} = %s" for k in fields)
+            cur.execute(f"UPDATE care_team SET {set_clause} WHERE member_id = %s", list(fields.values()) + [member_id])
+            conn.commit()
+        return {"success": True}
+    finally:
+        cur.close(); conn.close()
+
+@app.delete("/care-team/{member_id}")
+async def delete_care_team_member(member_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM care_team WHERE member_id = %s", (member_id,))
+        conn.commit()
+        return {"success": True}
+    finally:
+        cur.close(); conn.close()
+
+# ── Clear all history ──────────────────────────────────────────────────────────
+
+@app.delete("/users/{user_id}/history")
+async def clear_user_history(user_id: int):
+    """Delete all medical data for a user while preserving their account."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # medication_taken cascades from medication_logs
+        cur.execute("DELETE FROM medication_logs WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM appointments WHERE patient_id = %s", (user_id,))
+        cur.execute("DELETE FROM symptom_logs WHERE user_id = %s", (user_id,))
+        # discharge_uploads cascade-deletes discharge_instructions via FK; delete explicitly too
+        cur.execute("DELETE FROM discharge_instructions WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM discharge_uploads WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM visit_summaries WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM notes WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM reminders WHERE user_id = %s", (user_id,))
+        conn.commit()
+        return {"ok": True}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
 # ── Chat ───────────────────────────────────────────────────────────────────────
 
 @app.post("/chat", response_model=ChatResponse)
@@ -986,7 +1149,9 @@ async def chat(request: ChatRequest):
             user_id = user_data["user_id"]
         else:
             user_id = 1
-        message_with_id = f"[user_id={user_id}] {request.message}"
+        first_name = (request.user_name or "").split()[0] if request.user_name else ""
+        name_tag = f", name={first_name}" if first_name else ""
+        message_with_id = f"[user_id={user_id}{name_tag}] {request.message}"
         result = agent.invoke({"messages": [HumanMessage(content=message_with_id)]})
         response_text = result["messages"][-1].content
         return ChatResponse(response=response_text)
