@@ -4,7 +4,7 @@ export async function getSummaries(userId: number) {
   return res.json()
 }
 
-export async function createSummary(payload: { user_id: number; title?: string; visit_date?: string }) {
+export async function createSummary(payload: { user_id: number; title?: string; visit_date?: string; upload_id?: number }) {
   const res = await fetch('/summaries', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

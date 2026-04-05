@@ -236,6 +236,18 @@ def init_db():
         "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
         "ALTER TABLE medication_logs ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT",
+        """CREATE TABLE IF NOT EXISTS discharge_uploads (
+            upload_id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            pdf_text TEXT,
+            medications_added INTEGER DEFAULT 0,
+            appointments_scheduled INTEGER DEFAULT 0,
+            instructions_saved INTEGER DEFAULT 0,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+        "ALTER TABLE visit_summaries ADD COLUMN IF NOT EXISTS source_upload_id INTEGER REFERENCES discharge_uploads(upload_id) ON DELETE SET NULL",
+        "ALTER TABLE discharge_uploads ADD COLUMN IF NOT EXISTS pdf_bytes BYTEA",
     ]
     for sql in migrations:
         cur.execute(sql)

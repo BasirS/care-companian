@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 from langchain_core.messages import HumanMessage
@@ -104,6 +104,7 @@ class CreateSummaryRequest(BaseModel):
     user_id: int
     title: Optional[str] = "Visit Summary"
     visit_date: Optional[str] = None
+    upload_id: Optional[int] = None
 
 class UpdateSummaryRequest(BaseModel):
     user_notes: Optional[str] = None
@@ -692,7 +693,7 @@ async def get_summaries(user_id: int):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT summary_id, title, ai_summary, user_notes, visit_date, created_at
+            SELECT summary_id, title, ai_summary, user_notes, visit_date, created_at, source_upload_id
             FROM visit_summaries WHERE user_id = %s ORDER BY created_at DESC
         """, (user_id,))
         rows = cur.fetchall()
@@ -701,6 +702,7 @@ async def get_summaries(user_id: int):
             "user_notes": r[3],
             "visit_date": r[4].isoformat() if r[4] else None,
             "created_at": _iso(r[5]),
+            "source_upload_id": r[6],
         } for r in rows]
         last_date = summaries[0]["created_at"] if summaries else None
         return {"summaries": summaries, "last_summary_date": last_date}
@@ -713,13 +715,21 @@ async def create_summary(req: CreateSummaryRequest):
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # Patient profile
+        cur.execute("SELECT name, date_of_birth, patient_id_number FROM users WHERE user_id = %s", (req.user_id,))
+        profile_row = cur.fetchone()
+        patient_name = profile_row[0] if profile_row else "Unknown"
+        dob = profile_row[1].strftime('%m/%d/%Y') if profile_row and profile_row[1] else "N/A"
+        mrn = profile_row[2] or "N/A"
+        today_str = date.today().strftime('%B %d, %Y')
+
         symptoms = _get_symptom_logs(req.user_id)
         medications = _get_medications(req.user_id)
         appointments = _get_appointments(req.user_id)
 
         symptom_str = "\n".join(
-            f"- {s[0]} (Severity: {s[1]}/10) on {s[2].strftime('%b %d') if hasattr(s[2],'strftime') else s[2]}"
-            for s in symptoms[:10]
+            f"- {s[0]} (Severity: {s[1]}/10) on {s[2].strftime('%b %d, %Y') if hasattr(s[2],'strftime') else s[2]}"
+            for s in symptoms[:15]
         ) or "No symptoms logged."
         med_str = "\n".join(f"- {m[0]} {m[1] or ''}: {m[2] or ''}" for m in medications) or "No medications."
         appt_str = "\n".join(
@@ -727,9 +737,36 @@ async def create_summary(req: CreateSummaryRequest):
             for a in appointments
         ) or "No upcoming appointments."
 
-        prompt = f"""You are a medical assistant helping a patient prepare for a doctor's visit.
+        # Pull discharge PDF text(s)
+        if req.upload_id:
+            cur.execute("SELECT file_name, pdf_text, uploaded_at FROM discharge_uploads WHERE upload_id = %s AND user_id = %s", (req.upload_id, req.user_id))
+            pdf_rows = cur.fetchall()
+        else:
+            cur.execute("SELECT file_name, pdf_text, uploaded_at FROM discharge_uploads WHERE user_id = %s ORDER BY uploaded_at DESC LIMIT 3", (req.user_id,))
+            pdf_rows = cur.fetchall()
+        if pdf_rows:
+            discharge_sections = []
+            for r in pdf_rows:
+                uploaded = r[2].strftime('%b %d, %Y') if hasattr(r[2], 'strftime') else str(r[2])
+                text_snippet = (r[1] or '')[:3000]
+                discharge_sections.append(f"[{r[0]} — uploaded {uploaded}]\n{text_snippet}")
+            discharge_str = "\n\n".join(discharge_sections)
+        else:
+            discharge_str = "No discharge papers uploaded."
 
-SYMPTOMS (Recent):
+        prompt = f"""You are a medical assistant generating a structured visit summary for a patient's doctor appointment.
+Use ALL of the data below. Output ONLY valid Markdown — use ## for section headings, **bold** for labels and key terms, bullet points (*) for lists. No plain paragraphs for lists.
+
+PATIENT:
+- Name: {patient_name}
+- DOB: {dob}
+- MRN: {mrn}
+- Summary date: {today_str}
+
+DISCHARGE PAPERS (most recent):
+{discharge_str}
+
+RECENT SYMPTOMS:
 {symptom_str}
 
 CURRENT MEDICATIONS:
@@ -738,22 +775,63 @@ CURRENT MEDICATIONS:
 UPCOMING APPOINTMENTS:
 {appt_str}
 
-Generate a concise, professional visit summary with:
-- Overall health trend (improving/worsening/stable)
-- Key concerns to discuss with the doctor (2-3 bullet points)
-- Suggested questions for the doctor (2-3)
-- What to bring to the appointment
+Output the summary using EXACTLY this structure (do not add or remove sections):
+
+## Patient Visit Summary
+
+**Patient Name:** {patient_name}
+**DOB:** {dob}
+**MRN:** {mrn}
+**Date:** {today_str}
+
+---
+
+**Overall Health Trend:**
+
+[1-2 sentences on trend since discharge, referencing specific symptoms and dates]
+
+---
+
+**Key Discharge Instructions (To Reinforce):**
+
+* **[Category]:** [instruction]
+* **[Category]:** [instruction]
+(list all important discharge instructions extracted from the PDF)
+
+---
+
+**Key Concerns to Discuss with the Doctor:**
+
+* [Concern 1]
+* [Concern 2]
+* [Concern 3]
+
+---
+
+**Suggested Questions for the Doctor:**
+
+* [Question 1]
+* [Question 2]
+* [Question 3]
+
+---
+
+**What to Bring to the Appointment:**
+
+* [Item 1]
+* [Item 2]
+* [Item 3]
 """
         response = _genai_model.generate_content(prompt)
         ai_text = response.text
 
         cur.execute("""
-            INSERT INTO visit_summaries (user_id, title, ai_summary, visit_date)
-            VALUES (%s, %s, %s, %s) RETURNING summary_id
-        """, (req.user_id, req.title, ai_text, req.visit_date or date.today().isoformat()))
+            INSERT INTO visit_summaries (user_id, title, ai_summary, visit_date, source_upload_id)
+            VALUES (%s, %s, %s, %s, %s) RETURNING summary_id
+        """, (req.user_id, req.title, ai_text, req.visit_date or date.today().isoformat(), req.upload_id))
         summary_id = cur.fetchone()[0]
         conn.commit()
-        return {"summary_id": summary_id, "title": req.title, "ai_summary": ai_text}
+        return {"summary_id": summary_id, "title": req.title, "ai_summary": ai_text, "source_upload_id": req.upload_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -795,6 +873,66 @@ async def delete_summary(summary_id: int):
 
 # ── Discharge PDF upload ───────────────────────────────────────────────────────
 
+@app.get("/discharge-uploads/{user_id}")
+async def get_discharge_uploads(user_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT upload_id, file_name, pdf_text, medications_added,
+                   appointments_scheduled, instructions_saved, uploaded_at,
+                   pdf_bytes IS NOT NULL AS has_pdf
+            FROM discharge_uploads WHERE user_id = %s ORDER BY uploaded_at DESC
+        """, (user_id,))
+        rows = cur.fetchall()
+        return {"uploads": [{
+            "upload_id": r[0], "file_name": r[1], "pdf_text": r[2],
+            "medications_added": r[3], "appointments_scheduled": r[4],
+            "instructions_saved": r[5], "uploaded_at": _iso(r[6]),
+            "has_pdf": r[7],
+        } for r in rows]}
+    finally:
+        cur.close()
+        conn.close()
+
+@app.delete("/discharge-uploads/{upload_id}")
+async def delete_discharge_upload(upload_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM discharge_uploads WHERE upload_id = %s", (upload_id,))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@app.get("/discharge-uploads/{upload_id}/pdf")
+async def get_discharge_pdf(upload_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT file_name, pdf_bytes FROM discharge_uploads WHERE upload_id = %s", (upload_id,))
+        row = cur.fetchone()
+        if not row or not row[1]:
+            raise HTTPException(status_code=404, detail="PDF not found.")
+        file_name, pdf_bytes = row
+        return Response(
+            content=bytes(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{file_name}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.post("/upload-discharge")
 async def upload_discharge(user_id: int = Form(...), file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -811,12 +949,24 @@ async def upload_discharge(user_id: int = Form(...), file: UploadFile = File(...
         if not text.strip():
             raise HTTPException(status_code=422, detail="Could not extract text from PDF.")
         result = parse_discharge_instructions.invoke({"user_id": user_id, "discharge_text": text})
-        # Parse counts from result string
         import re
         meds = int(m.group(1)) if (m := re.search(r"Medications added: (\d+)", result)) else 0
         appts = int(m.group(1)) if (m := re.search(r"Appointments scheduled: (\d+)", result)) else 0
         instrs = int(m.group(1)) if (m := re.search(r"Care instructions saved: (\d+)", result)) else 0
-        return {"medications_added": meds, "appointments_scheduled": appts,
+        # Save upload history
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO discharge_uploads (user_id, file_name, pdf_text, pdf_bytes, medications_added,
+                                           appointments_scheduled, instructions_saved)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING upload_id
+        """, (user_id, file.filename, text, contents, meds, appts, instrs))
+        upload_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"upload_id": upload_id, "file_name": file.filename,
+                "medications_added": meds, "appointments_scheduled": appts,
                 "instructions_saved": instrs, "raw_result": result}
     except HTTPException:
         raise
