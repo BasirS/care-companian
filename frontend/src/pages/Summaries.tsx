@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { useApi } from '../hooks/useApi'
-import { getSummaries, createSummary, updateSummary } from '../api/summaries'
+import { getSummaries, createSummary, updateSummary, deleteSummary } from '../api/summaries'
 
 interface Summary {
   summary_id: number; title: string; ai_summary: string;
@@ -19,6 +19,9 @@ export default function Summaries() {
   const [showGen, setShowGen] = useState(false)
   const [genForm, setGenForm] = useState({ title: '', visit_date: '' })
   const [generating, setGenerating] = useState(false)
+  const [editingTitleId, setEditingTitleId] = useState<number | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const debounceTimers = new Map<number, ReturnType<typeof setTimeout>>()
 
@@ -31,6 +34,20 @@ export default function Summaries() {
       setSaving(prev => ({ ...prev, [summaryId]: false }))
     }, 1200)
     debounceTimers.set(summaryId, timer)
+  }
+
+  async function handleDeleteSummary(summaryId: number) {
+    setDeletingId(summaryId)
+    await deleteSummary(summaryId)
+    if (expanded === summaryId) setExpanded(null)
+    setDeletingId(null)
+    refetch()
+  }
+
+  async function handleSaveTitle(summaryId: number) {
+    await updateSummary(summaryId, { title: editTitle })
+    setEditingTitleId(null)
+    refetch()
   }
 
   async function handleGenerate(e: React.FormEvent) {
@@ -141,25 +158,37 @@ export default function Summaries() {
               transition: 'box-shadow 0.2s',
             }}>
               {/* Card header */}
-              <button
-                onClick={() => setExpanded(expanded === s.summary_id ? null : s.summary_id)}
-                style={{
-                  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '18px 22px', background: 'transparent', border: 'none', cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--navy)', marginBottom: 4, fontFamily: 'var(--font-heading)' }}>
-                    {s.title}
+              <div style={{ display: 'flex', alignItems: 'center', padding: '18px 22px', gap: 8 }}>
+                <button
+                  onClick={() => setExpanded(expanded === s.summary_id ? null : s.summary_id)}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}
+                >
+                  <div>
+                    {editingTitleId === s.summary_id ? (
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                        <input value={editTitle} onChange={e => setEditTitle(e.target.value)}
+                          style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)', fontFamily: 'var(--font-heading)', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 8px', outline: 'none' }}
+                          autoFocus onKeyDown={e => { if (e.key === 'Enter') handleSaveTitle(s.summary_id); if (e.key === 'Escape') setEditingTitleId(null) }} />
+                        <button onClick={() => handleSaveTitle(s.summary_id)} style={{ background: 'var(--navy)', color: '#fff', border: 'none', borderRadius: 6, padding: '3px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Save</button>
+                        <button onClick={() => setEditingTitleId(null)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Cancel</button>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--navy)', marginBottom: 4, fontFamily: 'var(--font-heading)' }}>{s.title}</div>
+                    )}
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 12 }}>
+                      {s.visit_date && <span>📅 {new Date(s.visit_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                      <span>Generated {new Date(s.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                    </div>
                   </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 12 }}>
-                    {s.visit_date && <span>📅 {new Date(s.visit_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-                    <span>Generated {new Date(s.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-                  </div>
-                </div>
-                <span style={{ fontSize: 18, color: 'var(--text-muted)', transform: expanded === s.summary_id ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>›</span>
-              </button>
+                  <span style={{ fontSize: 18, color: 'var(--text-muted)', transform: expanded === s.summary_id ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', marginRight: 8 }}>›</span>
+                </button>
+                <button onClick={e => { e.stopPropagation(); setEditingTitleId(s.summary_id); setEditTitle(s.title) }}
+                  style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '5px 10px', fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)', flexShrink: 0 }}>Edit</button>
+                <button onClick={e => { e.stopPropagation(); handleDeleteSummary(s.summary_id) }} disabled={deletingId === s.summary_id}
+                  style={{ background: 'none', border: '1px solid var(--danger-border)', borderRadius: 7, padding: '5px 10px', fontSize: 11, color: 'var(--danger)', cursor: 'pointer', fontFamily: 'var(--font-body)', flexShrink: 0 }}>
+                  {deletingId === s.summary_id ? '…' : 'Delete'}
+                </button>
+              </div>
 
               {/* Expanded content */}
               {expanded === s.summary_id && (

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { useApi } from '../hooks/useApi'
-import { getAppointments, addAppointment, updateAppointment } from '../api/appointments'
+import { getAppointments, addAppointment, updateAppointment, deleteAppointment } from '../api/appointments'
 
 interface Appointment {
   id: number; appointment_time: string; reason: string;
@@ -14,10 +14,63 @@ const TYPE_COLORS: Record<string, string> = {
   'surgery': '#ef4444', 'consultation': '#059669', 'other': '#6b7280',
 }
 
-function ApptCard({ appt, onComplete }: { appt: Appointment; onComplete: () => void; onRefetch: () => void }) {
+function ApptCard({ appt, onComplete, onDelete, onSaveEdit }: {
+  appt: Appointment; onComplete: () => void; onDelete: () => void;
+  onRefetch: () => void;
+  onSaveEdit: (fields: Partial<Appointment>) => void;
+}) {
+  const [editing, setEditing] = useState(false)
+  const [editForm, setEditForm] = useState({
+    reason: appt.reason,
+    appointment_time: appt.appointment_time.slice(0, 16),
+    location: appt.location || '',
+    appointment_type: appt.appointment_type,
+  })
+
   const dt = new Date(appt.appointment_time)
   const color = TYPE_COLORS[appt.appointment_type] || '#6b7280'
   const isCompleted = appt.status === 'completed'
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%', background: 'var(--surface-2)', border: '1px solid var(--border)',
+    borderRadius: 8, padding: '7px 11px', fontSize: 13, color: 'var(--text)',
+    fontFamily: 'var(--font-body)', outline: 'none', boxSizing: 'border-box',
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: '18px 20px', boxShadow: 'var(--shadow-sm)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Reason</label>
+            <input style={inputStyle} value={editForm.reason} onChange={e => setEditForm(f => ({ ...f, reason: e.target.value }))} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Date & Time</label>
+            <input style={inputStyle} type="datetime-local" value={editForm.appointment_time} onChange={e => setEditForm(f => ({ ...f, appointment_time: e.target.value }))} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Location</label>
+            <input style={inputStyle} value={editForm.location} onChange={e => setEditForm(f => ({ ...f, location: e.target.value }))} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Type</label>
+            <select style={inputStyle} value={editForm.appointment_type} onChange={e => setEditForm(f => ({ ...f, appointment_type: e.target.value }))}>
+              <option value="follow-up">Follow-up</option>
+              <option value="consultation">Consultation</option>
+              <option value="therapy">Therapy</option>
+              <option value="surgery">Surgery</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => { onSaveEdit(editForm); setEditing(false) }} style={{ background: 'var(--navy)', color: '#fff', border: 'none', borderRadius: 7, padding: '6px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Save</button>
+          <button onClick={() => setEditing(false)} style={{ background: 'var(--surface)', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 16px', fontSize: 12, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Cancel</button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{
@@ -30,48 +83,30 @@ function ApptCard({ appt, onComplete }: { appt: Appointment; onComplete: () => v
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{appt.reason}</span>
-            <span style={{
-              background: `${color}18`, color, border: `1px solid ${color}40`,
-              borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600,
-            }}>{appt.appointment_type}</span>
+            <span style={{ background: `${color}18`, color, border: `1px solid ${color}40`, borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>{appt.appointment_type}</span>
             {appt.source === 'discharge' && (
-              <span style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>
-                From Discharge
-              </span>
+              <span style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>From Discharge</span>
             )}
             {isCompleted && (
-              <span style={{ background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>
-                ✓ Completed
-              </span>
+              <span style={{ background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>✓ Completed</span>
             )}
           </div>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 13, color: 'var(--text-mid)', display: 'flex', alignItems: 'center', gap: 5 }}>
-              📅 {dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
-            </span>
-            <span style={{ fontSize: 13, color: 'var(--text-mid)', display: 'flex', alignItems: 'center', gap: 5 }}>
-              🕐 {dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
-            </span>
-            {appt.location && (
-              <span style={{ fontSize: 13, color: 'var(--text-mid)', display: 'flex', alignItems: 'center', gap: 5 }}>
-                📍 {appt.location}
-              </span>
-            )}
+            <span style={{ fontSize: 13, color: 'var(--text-mid)' }}>📅 {dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>
+            <span style={{ fontSize: 13, color: 'var(--text-mid)' }}>🕐 {dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</span>
+            {appt.location && <span style={{ fontSize: 13, color: 'var(--text-mid)' }}>📍 {appt.location}</span>}
           </div>
         </div>
-        {!isCompleted && (
-          <button onClick={onComplete} style={{
-            background: 'var(--surface-2)', border: '1px solid var(--border)',
-            borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 500,
-            color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)',
-            whiteSpace: 'nowrap', flexShrink: 0, transition: 'all 0.15s',
-          }}
-            onMouseEnter={e => { e.currentTarget.style.background = '#f0fdf4'; e.currentTarget.style.borderColor = '#bbf7d0'; e.currentTarget.style.color = '#15803d' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'var(--surface-2)'; e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)' }}
-          >
-            Mark Complete
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {!isCompleted && (
+            <button onClick={onComplete} style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 500, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)', whiteSpace: 'nowrap' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#f0fdf4'; e.currentTarget.style.borderColor = '#bbf7d0'; e.currentTarget.style.color = '#15803d' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'var(--surface-2)'; e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+            >Mark Complete</button>
+          )}
+          <button onClick={() => setEditing(true)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 12px', fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Edit</button>
+          <button onClick={onDelete} style={{ background: 'none', border: '1px solid var(--danger-border)', borderRadius: 8, padding: '6px 12px', fontSize: 12, color: 'var(--danger)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Delete</button>
+        </div>
       </div>
     </div>
   )
@@ -111,6 +146,16 @@ export default function Appointments() {
     await updateAppointment(id, { status: 'completed' })
     refetch()
   }
+
+  async function handleDelete(id: number) {
+    await deleteAppointment(id)
+    refetch()
+  }
+
+  const handleSaveEdit = useCallback(async (id: number, fields: Partial<Appointment>) => {
+    await updateAppointment(id, fields as Record<string, string>)
+    refetch()
+  }, [refetch])
 
   const upcoming: Appointment[] = data?.upcoming ?? []
   const completed: Appointment[] = data?.completed ?? []
@@ -228,6 +273,8 @@ export default function Appointments() {
           {list.map(appt => (
             <ApptCard key={appt.id} appt={appt}
               onComplete={() => handleComplete(appt.id)}
+              onDelete={() => handleDelete(appt.id)}
+              onSaveEdit={(fields) => handleSaveEdit(appt.id, fields)}
               onRefetch={refetch} />
           ))}
         </div>

@@ -26,3 +26,9 @@ export async function updateAppointment(id: number, fields: Record<string, strin
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
   return res.json()
 }
+
+export async function deleteAppointment(id: number) {
+  const res = await fetch(`/appointments/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}

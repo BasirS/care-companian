@@ -32,3 +32,22 @@ export async function getMedicationInfo(name: string) {
   if (!res.ok) throw new Error(`Error ${res.status}`)
   return res.json()
 }
+
+export async function updateMedication(medicationId: number, fields: {
+  medication_name?: string; dosage?: string; schedule?: string;
+  start_date?: string; end_date?: string
+}) {
+  const res = await fetch(`/medications/${medicationId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}
+
+export async function deleteMedication(medicationId: number) {
+  const res = await fetch(`/medications/${medicationId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}

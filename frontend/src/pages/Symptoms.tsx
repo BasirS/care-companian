@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import { useAuth } from '../context/AuthContext'
 import { useApi } from '../hooks/useApi'
-import { getSymptoms, logSymptom } from '../api/symptoms'
+import { getSymptoms, logSymptom, updateSymptom, deleteSymptom } from '../api/symptoms'
 import { WARNING_SIGNS } from '../lib/warningData'
 import EmergencyAlert from '../components/EmergencyAlert'
 
@@ -46,6 +46,9 @@ export default function Symptoms() {
   const [submitting, setSubmitting] = useState(false)
   const [assessment, setAssessment] = useState<{ level: string; reason: string } | null>(null)
   const [showEmergency, setShowEmergency] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editForm, setEditForm] = useState({ symptom: '', severity: 3, condition_type: '' })
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const inputStyle: React.CSSProperties = {
     width: '100%', background: 'var(--surface-2)',
@@ -69,6 +72,24 @@ export default function Symptoms() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  function startEdit(s: { symptom_id: number; symptom: string; severity: number; condition_type: string }) {
+    setEditingId(s.symptom_id)
+    setEditForm({ symptom: s.symptom, severity: s.severity, condition_type: s.condition_type || '' })
+  }
+
+  async function handleEdit(symptomId: number) {
+    await updateSymptom(symptomId, editForm)
+    setEditingId(null)
+    refetch()
+  }
+
+  async function handleDelete(symptomId: number) {
+    setDeletingId(symptomId)
+    await deleteSymptom(symptomId)
+    setDeletingId(null)
+    refetch()
   }
 
   const sevColor = severity <= 3 ? '#22c55e' : severity <= 6 ? '#f59e0b' : '#ef4444'
@@ -149,25 +170,43 @@ export default function Symptoms() {
             <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No symptoms logged today. You're doing great!</p>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {data?.today?.map((s: { symptom_id: number; symptom: string; severity: number; logged_at: string }) => {
+              {data?.today?.map((s: { symptom_id: number; symptom: string; severity: number; condition_type: string; logged_at: string }) => {
                 const col = s.severity <= 3 ? '#22c55e' : s.severity <= 6 ? '#f59e0b' : '#ef4444'
+                const isEditing = editingId === s.symptom_id
                 return (
                   <div key={s.symptom_id} style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
                     padding: '10px 12px', background: 'var(--surface-2)',
                     border: '1px solid var(--border-light)', borderRadius: 10,
                   }}>
-                    <div style={{
-                      width: 32, height: 32, borderRadius: 8, background: `${col}20`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 13, fontWeight: 700, color: col, flexShrink: 0,
-                    }}>{s.severity}</div>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--navy)' }}>{s.symptom}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {new Date(s.logged_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                    {isEditing ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <input value={editForm.symptom} onChange={e => setEditForm(f => ({ ...f, symptom: e.target.value }))}
+                          style={{ ...inputStyle, fontSize: 13 }} />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Severity:</span>
+                          <input type="range" min={1} max={10} value={editForm.severity}
+                            onChange={e => setEditForm(f => ({ ...f, severity: Number(e.target.value) }))}
+                            style={{ flex: 1, accentColor: editForm.severity <= 3 ? '#22c55e' : editForm.severity <= 6 ? '#f59e0b' : '#ef4444' }} />
+                          <span style={{ fontSize: 12, fontWeight: 700, color: editForm.severity <= 3 ? '#22c55e' : editForm.severity <= 6 ? '#f59e0b' : '#ef4444', minWidth: 20 }}>{editForm.severity}</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={() => handleEdit(s.symptom_id)} style={{ background: 'var(--navy)', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Save</button>
+                          <button onClick={() => setEditingId(null)} style={{ background: 'var(--surface)', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 7, padding: '5px 14px', fontSize: 12, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Cancel</button>
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: `${col}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: col, flexShrink: 0 }}>{s.severity}</div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--navy)' }}>{s.symptom}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{new Date(s.logged_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>
+                        </div>
+                        <button onClick={() => startEdit(s)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Edit</button>
+                        <button onClick={() => handleDelete(s.symptom_id)} disabled={deletingId === s.symptom_id} style={{ background: 'none', border: '1px solid var(--danger-border)', borderRadius: 7, padding: '4px 10px', fontSize: 11, color: 'var(--danger)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>
+                          {deletingId === s.symptom_id ? '…' : 'Delete'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )
               })}

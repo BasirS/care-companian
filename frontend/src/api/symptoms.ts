@@ -16,3 +16,19 @@ export async function logSymptom(userId: number, payload: { symptom: string; sev
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
   return res.json()
 }
+
+export async function updateSymptom(symptomId: number, fields: { symptom?: string; severity?: number; condition_type?: string }) {
+  const res = await fetch(`/symptoms/${symptomId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}
+
+export async function deleteSymptom(symptomId: number) {
+  const res = await fetch(`/symptoms/${symptomId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}

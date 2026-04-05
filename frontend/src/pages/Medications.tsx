@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { useApi } from '../hooks/useApi'
-import { getMedications, markMedicationTaken, addMedication, getMedicationInfo } from '../api/medications'
+import { getMedications, markMedicationTaken, addMedication, getMedicationInfo, updateMedication, deleteMedication } from '../api/medications'
 
 interface Medication {
   medication_id: number; medication_name: string; dosage: string;
@@ -24,6 +24,9 @@ export default function Medications() {
   const [addForm, setAddForm] = useState({ medication_name: '', dosage: '', schedule: '', start_date: '', end_date: '' })
   const [addLoading, setAddLoading] = useState(false)
   const [takingId, setTakingId] = useState<number | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editForm, setEditForm] = useState({ medication_name: '', dosage: '', schedule: '', start_date: '', end_date: '' })
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const inputStyle: React.CSSProperties = {
     width: '100%', background: 'var(--surface-2)',
@@ -48,6 +51,25 @@ export default function Medications() {
     setExpandedInfo(prev => ({ ...prev, [med.medication_id]: null }))
     const info = await getMedicationInfo(med.medication_name)
     setExpandedInfo(prev => ({ ...prev, [med.medication_id]: info }))
+  }
+
+  function startEdit(med: Medication) {
+    setEditingId(med.medication_id)
+    setEditForm({ medication_name: med.medication_name, dosage: med.dosage || '', schedule: med.schedule || '', start_date: med.start_date || '', end_date: med.end_date || '' })
+  }
+
+  async function handleEdit(e: React.FormEvent, medicationId: number) {
+    e.preventDefault()
+    await updateMedication(medicationId, editForm)
+    setEditingId(null)
+    refetch()
+  }
+
+  async function handleDelete(medicationId: number) {
+    setDeletingId(medicationId)
+    await deleteMedication(medicationId)
+    setDeletingId(null)
+    refetch()
   }
 
   async function handleAdd(e: React.FormEvent) {
@@ -160,6 +182,32 @@ export default function Medications() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {meds.map(med => (
               <div key={med.medication_id}>
+                {editingId === med.medication_id ? (
+                  <form onSubmit={e => handleEdit(e, med.medication_id)} style={{ background: 'var(--surface-2)', border: '1px solid var(--border-light)', borderRadius: 12, padding: '14px 16px' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                      <div>
+                        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Name</label>
+                        <input style={inputStyle} value={editForm.medication_name} onChange={e => setEditForm(f => ({ ...f, medication_name: e.target.value }))} required />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Dosage</label>
+                        <input style={inputStyle} value={editForm.dosage} onChange={e => setEditForm(f => ({ ...f, dosage: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Schedule</label>
+                        <input style={inputStyle} value={editForm.schedule} onChange={e => setEditForm(f => ({ ...f, schedule: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>End Date</label>
+                        <input style={inputStyle} type="date" value={editForm.end_date} onChange={e => setEditForm(f => ({ ...f, end_date: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button type="submit" style={{ background: 'var(--navy)', color: '#fff', border: 'none', borderRadius: 7, padding: '6px 16px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Save</button>
+                      <button type="button" onClick={() => setEditingId(null)} style={{ background: 'var(--surface)', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 16px', fontSize: 12, cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Cancel</button>
+                    </div>
+                  </form>
+                ) : (
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 14,
                   padding: '14px 16px',
@@ -168,7 +216,6 @@ export default function Medications() {
                   borderRadius: 12, transition: 'all 0.2s',
                   opacity: med.taken_today ? 0.8 : 1,
                 }}>
-                  {/* Checkbox */}
                   <button onClick={() => handleTake(med)} disabled={med.taken_today || takingId === med.medication_id}
                     style={{
                       width: 28, height: 28, borderRadius: 8, flexShrink: 0,
@@ -180,7 +227,6 @@ export default function Medications() {
                     }}>
                     {med.taken_today ? '✓' : takingId === med.medication_id ? '…' : ''}
                   </button>
-
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: med.taken_today ? '#15803d' : 'var(--navy)', textDecoration: med.taken_today ? 'line-through' : 'none' }}>
                       {med.medication_name} {med.dosage && <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>— {med.dosage}</span>}
@@ -189,17 +235,15 @@ export default function Medications() {
                       {med.schedule}{med.next_dose_time && !med.taken_today && ` · Next dose: ${med.next_dose_time}`}
                     </div>
                   </div>
-
-                  <button onClick={() => handleInfo(med)} style={{
-                    background: expandedInfo[med.medication_id] !== undefined ? 'var(--blue-light)' : 'var(--surface)',
-                    border: '1px solid var(--border)', borderRadius: 8,
-                    padding: '5px 12px', fontSize: 12, fontWeight: 500,
-                    color: expandedInfo[med.medication_id] !== undefined ? 'var(--accent)' : 'var(--text-muted)',
-                    cursor: 'pointer', fontFamily: 'var(--font-body)',
-                  }}>
+                  <button onClick={() => handleInfo(med)} style={{ background: expandedInfo[med.medication_id] !== undefined ? 'var(--blue-light)' : 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '5px 12px', fontSize: 12, fontWeight: 500, color: expandedInfo[med.medication_id] !== undefined ? 'var(--accent)' : 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>
                     {expandedInfo[med.medication_id] !== undefined ? 'Hide' : 'Info'}
                   </button>
+                  <button onClick={() => startEdit(med)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '5px 10px', fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>Edit</button>
+                  <button onClick={() => handleDelete(med.medication_id)} disabled={deletingId === med.medication_id} style={{ background: 'none', border: '1px solid var(--danger-border)', borderRadius: 7, padding: '5px 10px', fontSize: 11, color: 'var(--danger)', cursor: 'pointer', fontFamily: 'var(--font-body)' }}>
+                    {deletingId === med.medication_id ? '…' : 'Delete'}
+                  </button>
                 </div>
+                )}
 
                 {/* Info panel */}
                 {expandedInfo[med.medication_id] !== undefined && (

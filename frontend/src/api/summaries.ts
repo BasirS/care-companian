@@ -23,3 +23,9 @@ export async function updateSummary(summaryId: number, fields: { user_notes?: st
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
   return res.json()
 }
+
+export async function deleteSummary(summaryId: number) {
+  const res = await fetch(`/summaries/${summaryId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`)
+  return res.json()
+}

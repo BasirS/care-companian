@@ -866,7 +866,220 @@ Tool usage rules:
 - generate_visit_summary: Call this when patient is preparing for a doctor visit. Return the full tool output verbatim with no intro sentence — do not add any text before or after it.
 - consult_discharge_instructions_pdf: Call this when patient asks a specific question about their discharge PDF file.
 - lookup_medical_reference: Call this when patient asks about medication side effects or condition warning signs.
+- get_symptom_logs: Call this when patient wants to see their logged symptoms with IDs, or before editing/deleting a symptom.
+- edit_symptom: Call this when patient wants to update a logged symptom's description or severity. Get the symptom_id first with get_symptom_logs.
+- delete_symptom: Call this when patient wants to remove a logged symptom. Get the symptom_id first with get_symptom_logs.
+- edit_medication: Call this when patient wants to update a medication's name, dosage, schedule, or end date. Get the medication_id from create_medication_schedule.
+- delete_medication: Call this when patient wants to remove a medication. Get the medication_id from create_medication_schedule.
+- edit_appointment: Call this when patient wants to change an appointment's details (reason, date/time, location, type). Get the appointment_id from get_appointments.
+- delete_appointment: Call this when patient wants to cancel or remove an appointment. Get the appointment_id from get_appointments.
+- delete_summary: Call this when patient wants to delete a visit summary.
 """
+
+@tool
+def edit_symptom(user_id: int, symptom_id: int, symptom: Optional[str] = None, severity: Optional[int] = None) -> str:
+    """Edit a previously logged symptom. Provide symptom_id plus any fields to change (symptom text and/or severity 1-10).
+    Use get_symptom_logs first to find the symptom_id if the patient doesn't know it."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT symptom, severity FROM symptom_logs WHERE symptom_id = %s AND user_id = %s", (symptom_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Symptom ID {symptom_id} not found for this user."
+        fields = {}
+        if symptom is not None:
+            fields["symptom"] = symptom
+        if severity is not None:
+            if not 1 <= severity <= 10:
+                return "❌ Severity must be between 1 and 10."
+            fields["severity"] = severity
+        if not fields:
+            return "❌ Please provide at least one field to update (symptom text or severity)."
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        cur.execute(f"UPDATE symptom_logs SET {set_clause} WHERE symptom_id = %s", list(fields.values()) + [symptom_id])
+        conn.commit()
+        return f"✅ Symptom updated. New values: symptom='{fields.get('symptom', row[0])}', severity={fields.get('severity', row[1])}/10"
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def delete_symptom(user_id: int, symptom_id: int) -> str:
+    """Delete a previously logged symptom by its ID.
+    Use get_symptom_logs first to find the symptom_id if the patient doesn't know it."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT symptom FROM symptom_logs WHERE symptom_id = %s AND user_id = %s", (symptom_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Symptom ID {symptom_id} not found for this user."
+        cur.execute("DELETE FROM symptom_logs WHERE symptom_id = %s", (symptom_id,))
+        conn.commit()
+        return f"✅ Symptom '{row[0]}' (ID {symptom_id}) has been deleted."
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def get_symptom_logs(user_id: int) -> str:
+    """Get recent symptom logs with their IDs, for use when editing or deleting symptoms."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT symptom_id, symptom, severity, logged_at
+            FROM symptom_logs WHERE user_id = %s
+            ORDER BY logged_at DESC LIMIT 20
+        """, (user_id,))
+        rows = cur.fetchall()
+        if not rows:
+            return "No symptoms logged."
+        lines = ["Recent symptom logs:"]
+        for r in rows:
+            logged = r[3].strftime("%b %d at %I:%M %p") if hasattr(r[3], "strftime") else str(r[3])
+            lines.append(f"  ID {r[0]}: '{r[1]}' — severity {r[2]}/10 ({logged})")
+        return "\n".join(lines)
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def edit_medication(user_id: int, medication_id: int, medication_name: Optional[str] = None,
+                    dosage: Optional[str] = None, schedule: Optional[str] = None,
+                    end_date: Optional[str] = None) -> str:
+    """Edit an existing medication. Provide medication_id plus any fields to change.
+    Use create_medication_schedule to see current medications and their IDs."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT medication_name FROM medication_logs WHERE medication_id = %s AND user_id = %s", (medication_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Medication ID {medication_id} not found for this user."
+        fields = {}
+        if medication_name is not None: fields["medication_name"] = medication_name
+        if dosage is not None: fields["dosage"] = dosage
+        if schedule is not None: fields["schedule"] = schedule
+        if end_date is not None: fields["end_date"] = end_date
+        if not fields:
+            return "❌ Please provide at least one field to update."
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        cur.execute(f"UPDATE medication_logs SET {set_clause} WHERE medication_id = %s", list(fields.values()) + [medication_id])
+        conn.commit()
+        return f"✅ Medication '{row[0]}' (ID {medication_id}) has been updated: {', '.join(f'{k}={v}' for k, v in fields.items())}"
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def delete_medication(user_id: int, medication_id: int) -> str:
+    """Delete a medication from the patient's list by its ID.
+    Use create_medication_schedule to see current medications and their IDs."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT medication_name FROM medication_logs WHERE medication_id = %s AND user_id = %s", (medication_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Medication ID {medication_id} not found for this user."
+        cur.execute("DELETE FROM medication_taken WHERE medication_id = %s", (medication_id,))
+        cur.execute("DELETE FROM medication_logs WHERE medication_id = %s", (medication_id,))
+        conn.commit()
+        return f"✅ Medication '{row[0]}' (ID {medication_id}) has been removed."
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def edit_appointment(user_id: int, appointment_id: int, reason: Optional[str] = None,
+                     appointment_datetime: Optional[str] = None, location: Optional[str] = None,
+                     appointment_type: Optional[str] = None) -> str:
+    """Edit an existing appointment. Provide appointment_id plus any fields to change.
+    Use get_appointments to see current appointments and their IDs."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT reason FROM appointments WHERE id = %s AND patient_id = %s", (appointment_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Appointment ID {appointment_id} not found for this user."
+        fields = {}
+        if reason is not None: fields["reason"] = reason
+        if location is not None: fields["location"] = location
+        if appointment_type is not None: fields["appointment_type"] = appointment_type
+        if appointment_datetime is not None:
+            try:
+                fields["appointment_time"] = date_parser.parse(appointment_datetime).isoformat()
+            except Exception:
+                return f"❌ Could not parse date: '{appointment_datetime}'."
+        if not fields:
+            return "❌ Please provide at least one field to update."
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        cur.execute(f"UPDATE appointments SET {set_clause} WHERE id = %s", list(fields.values()) + [appointment_id])
+        conn.commit()
+        return f"✅ Appointment '{row[0]}' (ID {appointment_id}) has been updated."
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def delete_appointment(user_id: int, appointment_id: int) -> str:
+    """Delete an appointment by its ID.
+    Use get_appointments to see current appointments and their IDs."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT reason FROM appointments WHERE id = %s AND patient_id = %s", (appointment_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Appointment ID {appointment_id} not found for this user."
+        cur.execute("DELETE FROM appointments WHERE id = %s", (appointment_id,))
+        conn.commit()
+        return f"✅ Appointment '{row[0]}' (ID {appointment_id}) has been deleted."
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
+
+@tool
+def delete_summary(user_id: int, summary_id: int) -> str:
+    """Delete a visit summary by its ID."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT title FROM visit_summaries WHERE summary_id = %s AND user_id = %s", (summary_id, user_id))
+        row = cur.fetchone()
+        if not row:
+            return f"❌ Summary ID {summary_id} not found for this user."
+        cur.execute("DELETE FROM visit_summaries WHERE summary_id = %s", (summary_id,))
+        conn.commit()
+        return f"✅ Visit summary '{row[0]}' (ID {summary_id}) has been deleted."
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+    finally:
+        cur.close()
+        conn.close()
+
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
 
@@ -882,6 +1095,14 @@ tools = [
     generate_visit_summary,
     consult_discharge_instructions_pdf,
     lookup_medical_reference,
+    get_symptom_logs,
+    edit_symptom,
+    delete_symptom,
+    edit_medication,
+    delete_medication,
+    edit_appointment,
+    delete_appointment,
+    delete_summary,
 ]
 
 agent = create_react_agent(

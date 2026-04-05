@@ -109,6 +109,18 @@ class UpdateSummaryRequest(BaseModel):
     user_notes: Optional[str] = None
     title: Optional[str] = None
 
+class UpdateSymptomRequest(BaseModel):
+    symptom: Optional[str] = None
+    severity: Optional[int] = None
+    condition_type: Optional[str] = None
+
+class UpdateMedicationRequest(BaseModel):
+    medication_name: Optional[str] = None
+    dosage: Optional[str] = None
+    schedule: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
 class RegisterRequest(BaseModel):
     name: str
     email: str
@@ -392,6 +404,39 @@ async def log_symptom(user_id: int, req: LogSymptomRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/symptoms/{symptom_id}")
+async def update_symptom(symptom_id: int, req: UpdateSymptomRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        fields = req.model_dump(exclude_none=True)
+        if not fields:
+            return {"success": True}
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        values = list(fields.values()) + [symptom_id]
+        cur.execute(f"UPDATE symptom_logs SET {set_clause} WHERE symptom_id = %s", values)
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@app.delete("/symptoms/{symptom_id}")
+async def delete_symptom(symptom_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM symptom_logs WHERE symptom_id = %s", (symptom_id,))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
 # ── Medications ────────────────────────────────────────────────────────────────
 
 @app.get("/medications/{user_id}")
@@ -504,6 +549,40 @@ async def medication_info(name: str):
         return {"found": False, "name": name}
     return {"found": True, "name": name, **info}
 
+@app.put("/medications/{medication_id}")
+async def update_medication(medication_id: int, req: UpdateMedicationRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        fields = req.model_dump(exclude_none=True)
+        if not fields:
+            return {"success": True}
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        values = list(fields.values()) + [medication_id]
+        cur.execute(f"UPDATE medication_logs SET {set_clause} WHERE medication_id = %s", values)
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@app.delete("/medications/{medication_id}")
+async def delete_medication(medication_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM medication_taken WHERE medication_id = %s", (medication_id,))
+        cur.execute("DELETE FROM medication_logs WHERE medication_id = %s", (medication_id,))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
 # ── Appointments ───────────────────────────────────────────────────────────────
 
 @app.get("/appointments/{user_id}")
@@ -583,6 +662,20 @@ async def update_appointment(appt_id: int, req: UpdateAppointmentRequest):
         set_clause = ", ".join(f"{k} = %s" for k in fields)
         values = list(fields.values()) + [appt_id]
         cur.execute(f"UPDATE appointments SET {set_clause} WHERE id = %s", values)
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@app.delete("/appointments/{appt_id}")
+async def delete_appointment(appt_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM appointments WHERE id = %s", (appt_id,))
         conn.commit()
         return {"success": True}
     except Exception as e:
@@ -678,6 +771,20 @@ async def update_summary(summary_id: int, req: UpdateSummaryRequest):
         set_clause = ", ".join(f"{k} = %s" for k in fields)
         values = list(fields.values()) + [summary_id]
         cur.execute(f"UPDATE visit_summaries SET {set_clause} WHERE summary_id = %s", values)
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+@app.delete("/summaries/{summary_id}")
+async def delete_summary(summary_id: int):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM visit_summaries WHERE summary_id = %s", (summary_id,))
         conn.commit()
         return {"success": True}
     except Exception as e:
