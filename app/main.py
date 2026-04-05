@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+import bcrypt
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -108,6 +109,15 @@ class UpdateSummaryRequest(BaseModel):
     user_notes: Optional[str] = None
     title: Optional[str] = None
 
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def get_or_create_user(email: str, name: str | None = None) -> dict:
@@ -133,6 +143,45 @@ def _generate_patient_id(user_id: int) -> str:
     return f"PT-{user_id:04d}"
 
 # ── Auth / User endpoints ──────────────────────────────────────────────────────
+
+@app.post("/auth/register")
+async def register(req: RegisterRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT user_id FROM users WHERE email = %s", (req.email,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        pw_hash = bcrypt.hashpw(req.password.encode(), bcrypt.gensalt()).decode()
+        cur.execute(
+            "INSERT INTO users (name, email, password_hash, onboarded) VALUES (%s, %s, %s, FALSE) RETURNING user_id",
+            (req.name, req.email, pw_hash),
+        )
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        return {"user_id": user_id, "name": req.name, "email": req.email, "onboarded": False}
+    finally:
+        cur.close()
+        conn.close()
+
+@app.post("/auth/login")
+async def login(req: LoginRequest):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT user_id, name, password_hash, onboarded FROM users WHERE email = %s",
+            (req.email,),
+        )
+        row = cur.fetchone()
+        if not row or not row[2]:
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        if not bcrypt.checkpw(req.password.encode(), row[2].encode()):
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        return {"user_id": row[0], "name": row[1], "email": req.email, "onboarded": bool(row[3])}
+    finally:
+        cur.close()
+        conn.close()
 
 @app.get("/user-by-email/{email:path}")
 async def user_by_email(email: str):

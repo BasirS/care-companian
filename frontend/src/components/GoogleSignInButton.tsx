@@ -16,17 +16,16 @@ export default function GoogleSignInButton() {
       }
     }
 
-    if (window.google?.accounts?.id) {
-      render()
-    } else {
-      const interval = setInterval(() => {
-        if (window.google?.accounts?.id) {
-          clearInterval(interval)
-          render()
-        }
-      }, 100)
-      return () => clearInterval(interval)
-    }
+    // Wait until google is initialized (initialize() must be called first in AuthContext)
+    const interval = setInterval(() => {
+      if (window.google?.accounts?.id) {
+        clearInterval(interval)
+        // Small delay to ensure AuthContext's initialize() has run
+        setTimeout(render, 50)
+      }
+    }, 100)
+
+    return () => clearInterval(interval)
   }, [])
 
   return <div ref={containerRef} />

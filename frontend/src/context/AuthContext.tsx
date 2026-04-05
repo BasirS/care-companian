@@ -13,12 +13,16 @@ interface AuthContextType {
   user: GoogleUser | null
   signOut: () => void
   setOnboarded: (val: boolean) => void
+  signInWithPassword: (email: string, password: string) => Promise<void>
+  registerWithPassword: (name: string, email: string, password: string) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   signOut: () => {},
   setOnboarded: () => {},
+  signInWithPassword: async () => {},
+  registerWithPassword: async () => {},
 })
 
 declare global {
@@ -44,8 +48,18 @@ function decodeJwt(token: string) {
 
 const STORAGE_KEY = 'cc_user'
 
+function makePasswordUser(data: { user_id: number; name: string; email: string; onboarded: boolean }): GoogleUser {
+  return {
+    name: data.name,
+    email: data.email,
+    picture: '',
+    token: '',
+    userId: data.user_id,
+    onboarded: data.onboarded,
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // Warm up the server on app load (Render free tier cold start)
   useEffect(() => { fetch('/health').catch(() => {}) }, [])
 
   const [user, setUser] = useState<GoogleUser | null>(() => {
@@ -62,18 +76,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!clientId) return
 
     async function handleCredential(response: { credential: string }) {
-      const { name, email, picture } = decodeJwt(response.credential)
-      // Look up or create user in backend
-      const res = await fetch(`/user-by-email/${encodeURIComponent(email)}`)
-      const data = await res.json()
-      const fullUser: GoogleUser = {
-        name, email, picture,
-        token: response.credential,
-        userId: data.user_id,
-        onboarded: data.onboarded,
+      try {
+        const { name, email, picture } = decodeJwt(response.credential)
+        const res = await fetch(`/user-by-email/${encodeURIComponent(email)}`)
+        if (!res.ok) throw new Error(`Backend error: ${res.status}`)
+        const data = await res.json()
+        const fullUser: GoogleUser = {
+          name, email, picture,
+          token: response.credential,
+          userId: data.user_id,
+          onboarded: data.onboarded,
+        }
+        setUser(fullUser)
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(fullUser))
+      } catch (err) {
+        console.error('Sign-in failed:', err)
       }
-      setUser(fullUser)
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(fullUser))
     }
 
     function initGsi() {
@@ -96,6 +114,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  async function parseErrorResponse(res: Response, fallback: string): Promise<never> {
+    try {
+      const body = await res.text()
+      const json = body ? JSON.parse(body) : null
+      throw new Error(json?.detail || fallback)
+    } catch (e) {
+      if (e instanceof Error && e.message !== fallback) throw e
+      throw new Error(`${fallback} (HTTP ${res.status})`)
+    }
+  }
+
+  async function signInWithPassword(email: string, password: string) {
+    const res = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })
+    if (!res.ok) await parseErrorResponse(res, 'Login failed')
+    const data = await res.json()
+    const fullUser = makePasswordUser(data)
+    setUser(fullUser)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(fullUser))
+  }
+
+  async function registerWithPassword(name: string, email: string, password: string) {
+    const res = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password }),
+    })
+    if (!res.ok) await parseErrorResponse(res, 'Registration failed')
+    const data = await res.json()
+    const fullUser = makePasswordUser(data)
+    setUser(fullUser)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(fullUser))
+  }
+
   function signOut() {
     if (user && window.google?.accounts?.id) {
       window.google.accounts.id.disableAutoSelect()
@@ -113,7 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, signOut, setOnboarded }}>
+    <AuthContext.Provider value={{ user, signOut, setOnboarded, signInWithPassword, registerWithPassword }}>
       {children}
     </AuthContext.Provider>
   )

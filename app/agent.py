@@ -235,6 +235,7 @@ def init_db():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT",
         "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
         "ALTER TABLE medication_logs ADD COLUMN IF NOT EXISTS calendar_event_id TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT",
     ]
     for sql in migrations:
         cur.execute(sql)
