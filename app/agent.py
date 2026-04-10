@@ -130,6 +130,7 @@ def _create_recurring_medication_events(refresh_token: str, med_name: str, dosag
 # ── Database ───────────────────────────────────────────────────────────────────
 
 def get_db_connection():
+    # Neon pooler rejects startup `options=` (e.g. statement_timeout); use direct host if you need those.
     return psycopg2.connect(
         host=os.environ["DB_HOST"],
         database=os.environ["DB_NAME"],
@@ -138,7 +139,6 @@ def get_db_connection():
         port=os.environ["DB_PORT"],
         sslmode="require",
         connect_timeout=30,
-        options="-c statement_timeout=15000",
     )
 
 
