@@ -3,7 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import { useAuth } from '../context/AuthContext'
 import { useApi } from '../hooks/useApi'
 import { getSymptoms, logSymptom, updateSymptom, deleteSymptom } from '../api/symptoms'
-import { WARNING_SIGNS } from '../lib/warningData'
+import { WARNING_SIGNS, type WarningSignsEntry } from '../lib/warningData'
 import EmergencyAlert from '../components/EmergencyAlert'
 
 const CONDITIONS = [
@@ -241,14 +241,14 @@ export default function Symptoms() {
       {conditionType && WARNING_SIGNS[conditionType] && (
         <Card title={`⚠️ Warning Signs — ${CONDITIONS.find(c => c.value === conditionType)?.label}`}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14 }}>
-            {[
-              { key: 'emergency_signs', label: '🚨 Emergency', bg: 'var(--danger-bg)', border: 'var(--danger-border)', color: 'var(--danger)' },
-              { key: 'urgent_signs',    label: '⚠️ Urgent',    bg: '#fffbeb', border: '#fde68a', color: '#92400e' },
-              { key: 'expected_symptoms', label: '✅ Expected', bg: '#f0fdf4', border: '#bbf7d0', color: '#15803d' },
-            ].map(({ key, label, bg, border, color }) => (
+            {([
+              { key: 'emergency_signs' as const, label: '🚨 Emergency', bg: 'var(--danger-bg)', border: 'var(--danger-border)', color: 'var(--danger)' },
+              { key: 'urgent_signs' as const, label: '⚠️ Urgent', bg: '#fffbeb', border: '#fde68a', color: '#92400e' },
+              { key: 'expected_symptoms' as const, label: '✅ Expected', bg: '#f0fdf4', border: '#bbf7d0', color: '#15803d' },
+            ] as const satisfies ReadonlyArray<{ key: keyof WarningSignsEntry; label: string; bg: string; border: string; color: string }>).map(({ key, label, bg, border, color }) => (
               <div key={key} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: '12px 14px' }}>
                 <p style={{ fontSize: 12, fontWeight: 700, color, marginBottom: 8 }}>{label}</p>
-                {(WARNING_SIGNS[conditionType][key] as string[]).map((s: string, i: number) => (
+                {(WARNING_SIGNS[conditionType][key]).map((s: string, i: number) => (
                   <p key={i} style={{ fontSize: 12, color, lineHeight: 1.5, marginBottom: 4 }}>• {s}</p>
                 ))}
               </div>
