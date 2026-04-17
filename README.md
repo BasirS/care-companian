@@ -137,7 +137,7 @@ npm run dev
 
 ## Live Deployment
 
-The app is deployed on Render at [care-companion-gdsx.onrender.com](https://care-companion-gdsx.onrender.com/dashboard).
+The app is deployed on Render at [care-companion-kzf0.onrender.com](https://care-companion-kzf0.onrender.com/dashboard).
 
 ---
 
