@@ -1,6 +1,6 @@
 # CareCompanion
 
-**Break Through Tech x Agentic AI Specialization — Spring AI Studio 2026**
+**Break Through Tech x Agentic AI Specialization | Spring AI Studio 2026**
 
 **Healthcare Team 1**
 
